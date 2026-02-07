@@ -4,5 +4,5 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - run: ls
-      - run: cc -o muggin_test muggin.c muggin_test.c && ./muggin_test
+      - uses: actions/checkout@v6
+      - run: ./test.sh
