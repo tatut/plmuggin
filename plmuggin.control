@@ -1,0 +1,7 @@
+comment = 'PL/Muggin'
+default_version = '0.1'
+module_pathname = '$libdir/plmuggin'
+relocatable = false
+schema = pg_catalog
+superuser = false
+trusted = true

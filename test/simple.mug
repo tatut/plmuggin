@@ -1,0 +1,3 @@
+div#app.simple
+  a#home this is a link
+  div inner div
