@@ -16,32 +16,40 @@ typedef struct Pool {
 } Pool;
 
 static void *pool_alloc(Alloc *a, size_t sz) {
-  void *mem = palloc0(sz + sizeof(PEntry));
+  void *mem;
+  Pool *p;
+  PEntry *entry;
+
+  mem = palloc0(sz + sizeof(PEntry));
   if(!mem) {
     LOG_ERROR("Unable to allocate %zu bytes", sz);
     return NULL;
   }
-  Pool *p = (Pool*) a->user;
-  PEntry *entry = mem;
+  p = (Pool*) a->user;
+  entry = mem;
   entry->prev = p->last;
   entry->next = NULL;
   if(p->last)
     p->last->next = entry;
   p->last = entry;
-  return mem + sizeof(PEntry);
+  return (void*)( (char*)mem + sizeof(PEntry) );
 }
 
 static void *pool_realloc(Alloc *a, void *mem, size_t sz) {
+  Pool *p;
+  PEntry *entry, *prev, *next;
+  bool is_last;
+
   if(!mem) {
     return pool_alloc(a, sz);
   }
   // get the entry
-  Pool *p = (Pool*) a->user;
+  p = (Pool*) a->user;
   LOG_NOTICE("pool_realloc %zu, pool=%p, mem=%p", sz, p, mem);
-  PEntry *entry = mem - sizeof(PEntry);
-  PEntry *prev = entry->prev;
-  PEntry *next = entry->next;
-  bool is_last = p->last == entry;
+  entry = (PEntry*)( (char*)mem - sizeof(PEntry) );
+  prev = entry->prev;
+  next = entry->next;
+  is_last = p->last == entry;
 
   entry = repalloc(entry, sz + sizeof(PEntry));
   if(!entry) {
@@ -51,7 +59,7 @@ static void *pool_realloc(Alloc *a, void *mem, size_t sz) {
   if(prev) prev->next = entry;
   if(next) next->prev = entry;
   if(is_last) p->last = entry;
-  return entry + sizeof(PEntry);
+  return (void*)( (char*)entry + sizeof(PEntry) );
 }
 
 static void pool_free(Alloc *a, void *mem) {
@@ -70,10 +78,10 @@ void pool_release(Alloc *a) {
   pfree(a);
 }
 
-Alloc *pool_new() {
+Alloc *pool_new(void) {
   void *mem = palloc0( sizeof(Alloc) + sizeof(Pool));
   Alloc *a = mem;
-  Pool *p = mem + sizeof(Alloc);
+  Pool *p = (Pool*)( (char*)mem + sizeof(Alloc) );
   p->last = NULL;
   a->alloc = pool_alloc;
   a->realloc = pool_realloc;
