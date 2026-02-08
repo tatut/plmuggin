@@ -15,4 +15,5 @@ typedef struct Alloc {
 #define NEW_ARR(a, type, count) (type*)(ALLOC((a), sizeof(type)*(count)))
 #define REALLOC(a, ptr, new_size) (a)->realloc((a), (ptr), (new_size))
 
+
 #endif // alloc_h

@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 #include "alloc.h"
+#include "env.h"
 
 typedef struct str {
   size_t len;
@@ -28,7 +29,7 @@ typedef struct strbuf {
 
 #define STR_EMPTY ((str){.len = 0})
 
-#define str_constant(x) ((str){.len = sizeof(x), .data = x})
+#define str_constant(x) ((str){.len = sizeof(x)-1, .data = x})
 
 bool str_splitat(str in, const char *chars, str *split, str *rest);
 int str_indexof(str in, char ch);
@@ -67,16 +68,20 @@ bool strbuf_append_char(strbuf *buf, char ch);
 #include "alloc.h"
 
 str str_from_file(Alloc *a, const char *filename) {
-  FILE *f = fopen(filename, "r");
+  FILE *f;
+  size_t size;
+  str out;
+
+  f = fopen(filename, "r");
   if(!f) {
     fprintf(stderr, "Can't open file: %s\n", filename);
     goto fail;
   }
   fseek(f, 0, SEEK_END);
-  size_t size = ftell(f);
+  size = ftell(f);
   rewind(f);
 
-  str out = {.len = size, .data = ALLOC(a, size)};
+  out = (str) {.len = size, .data = ALLOC(a, size)};
   if(!out.data) {
     fprintf(stderr, "Alloc failed\n");
     goto fail;
@@ -94,9 +99,11 @@ str str_from_file(Alloc *a, const char *filename) {
 }
 
 bool str_splitat(str in, const char *chars, str *split, str *rest) {
+  size_t at;
+  int chs;
   if(in.len == 0) return false;
-  size_t at = 0;
-  int chs = strlen(chars);
+  at = 0;
+  chs = strlen(chars);
   while(at < in.len) {
     for(int i=0;i<chs;i++) {
       if(in.data[at] == chars[i]) {
@@ -179,24 +186,31 @@ str str_take(str big, size_t len) {
 }
 
 str str_from_cstr(const char *in) {
-  size_t len = strlen(in);
-  char *data = malloc(len);
+  size_t len;
+  char *data;
+
+  len = strlen(in);
+  data = malloc(len);
   if(!data) fprintf(stderr, "Malloc failed!");
   memcpy(data, in, len);
   return (str){.data = data, .len = len};
 }
 
 str str_dup(Alloc *a, str in) {
-  char *data = ALLOC(a, in.len);
+  char *data;
+  data = ALLOC(a, in.len);
   if(!data) fprintf(stderr, "Aalloc failed!");
   memcpy(data, in.data, in.len);
   return (str) {.len = in.len, .data = data};
 }
 
 void str_reverse(str mut) {
-  size_t l=0,r=mut.len-1;
+  size_t l, r;
+  l=0;
+  r=mut.len-1;
   while(l<r) {
-    char tmp = mut.data[l];
+    char tmp;
+    tmp = mut.data[l];
     mut.data[l] = mut.data[r];
     mut.data[r] = tmp;
     l++; r--;
@@ -215,7 +229,8 @@ bool str_eq(str a, str b) {
 }
 
 bool str_eq_cstr(str str, const char *cstring) {
-  int len = strlen(cstring);
+  int len;
+  len = strlen(cstring);
   if(len != str.len) return false;
   return strncmp(str.data, cstring, len) == 0;
 }
@@ -225,8 +240,9 @@ char str_char_at(str str, size_t idx) {
   return str.data[idx];
 }
 
-char *str_to_cstr(str str) {
-  char *cstr = malloc(str.len+1);
+char *str_to_cstr(str str) { // FIXME: pass in allocator
+  char *cstr;
+  cstr = malloc(str.len+1);
   if(!cstr) {
     printf("malloc failed");
     exit(1);
@@ -246,9 +262,12 @@ uint64_t str_hash(str in) {
 }
 
 strbuf *strbuf_new(Alloc *a) {
-  strbuf *sb = NEW(a, strbuf);
+  strbuf *sb;
+  char *initial;
+
+  sb = NEW(a, strbuf);
   if(!sb) return NULL;
-  char *initial = ALLOC(a, 64);
+  initial = ALLOC(a, 64);
   if(!initial) {
     FREE(a, sb);
     return NULL;
@@ -260,10 +279,22 @@ strbuf *strbuf_new(Alloc *a) {
 }
 
 bool strbuf_ensure(strbuf *buf, size_t space_needed) {
-  if(buf->capacity - buf->str.len < space_needed) {
-    size_t new_capacity = buf->capacity * 1.618; // grow by golden ratio
-    char *new_data = REALLOC(buf->alloc, buf->str.data, buf->capacity);
-    if(!new_data) return false;
+  size_t min_capacity, new_capacity;
+  char *new_data;
+
+  min_capacity = buf->str.len + space_needed;
+  if(buf->capacity < min_capacity) {
+    LOG_NOTICE("%ld - %ld < %ld, realloc", buf->capacity, buf->str.len, space_needed);
+    new_capacity = buf->capacity * 1.618; // grow by golden ratio
+    if(new_capacity < min_capacity) {
+      new_capacity = min_capacity;
+    }
+
+    new_data = REALLOC(buf->alloc, buf->str.data, buf->capacity);
+    if(!new_data) {
+      LOG_ERROR("Failed to realloc string buffer from size %zu to %zu", buf->capacity, new_capacity);
+      return false;
+    }
     buf->str.data = new_data;
     buf->capacity = new_capacity;
   }
@@ -279,9 +310,10 @@ bool strbuf_append_str(strbuf *buf, str data) {
 }
 
 bool strbuf_append_int(strbuf *buf, int i) {
+  size_t len;
   if(!strbuf_ensure(buf, 12)) return false;
-  size_t len = snprintf(&buf->str.data[buf->str.len], 12, "%d", i);
-  buf->str.len += len;
+  len = snprintf(&buf->str.data[buf->str.len], 12, "%d", i);
+  buf->str.len += (len-1);
   return true;
 }
 

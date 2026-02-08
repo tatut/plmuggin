@@ -13,6 +13,7 @@
 #include "utils/syscache.h"
 #include "muggin.h"
 #include "env.h"
+#include "pool.h"
 
 PG_MODULE_MAGIC;
 
@@ -76,6 +77,7 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   m_Template *tpl;
   str template;
   str rendered;
+  Alloc *pool;
 
   fn_pg_proc = SearchSysCache1(PROCOID, ObjectIdGetDatum(fcinfo->flinfo->fn_oid));
   if(!HeapTupleIsValid(fn_pg_proc)) {
@@ -101,7 +103,8 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   /* Load muggin template from source now */
   template = (str) {.data = source, .len = strlen(source) };
 
-  tpl = muggin_parse(&pg_alloc, template);
+  pool = pool_new();
+  tpl = muggin_parse(pool, template);
   if(!tpl) {
     elog(ERROR, "Template loading failed.");
   }
@@ -142,12 +145,15 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   fmgr_info_cxt(pg_type_entry->typinput, &result_in_func, proc_ctx);
   ReleaseSysCache(ret_type_tuple);
 
+  elog(NOTICE, "going to render now!");
   muggin_render(tpl, &pg_alloc, &rendered);
-  ereport(NOTICE, "rendered template!");
+  elog(NOTICE, "rendered template!");
   ret = InputFunctionCall(&result_in_func, rendered.data, result_typioparam, -1);
+  pool_release(pool);
+
   PG_RETURN_DATUM(ret);
 
 }
 
-void log_error(const char *error) { ereport(ERROR, error); }
-void log_notice(const char *notice) { ereport(NOTICE, notice); }
+void log_error(const char *error) { elog(ERROR, error); }
+void log_notice(const char *notice) { elog(NOTICE, notice); }

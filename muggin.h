@@ -5,19 +5,17 @@
 #include <stdbool.h>
 #include "str.h"
 #include "alloc.h"
+#include "postgres.h"
 
 typedef enum m_AttrType {
-  AT_STRING, // a str struct value
-  AT_INT,    // 64bit signed integer
-  AT_DOUBLE, // 64bit double
-  AT_BOOL,   // boolean, if 0 the attribute is omitted when rendering
-  AT_CONSTANTS, // list of constants, separated by space
+  AT_STRING,    // a str struct value
+  AT_INT,       // 64bit signed integer
+  AT_DOUBLE,    // 64bit double
+  AT_BOOL,      // boolean, if 0 the attribute is omitted when rendering
+  AT_CONSTANT,  // a single constant value
+  AT_VARIABLE,  // a single variable reference
+  AT_CONTENTS,  // list of constants and variable names
 } m_AttrType;
-
-typedef struct m_AttrConstants {
-  size_t constants_count;
-  size_t *constants;
-} m_AttrConstants;
 
 /* An HTML attribute */
 typedef struct m_Attr {
@@ -28,7 +26,9 @@ typedef struct m_Attr {
     int64_t int_value;
     bool bool_value;
     double double_value;
-    m_AttrConstants constants_value;
+    size_t variable; // id of variable name
+    size_t constant; // id of constant
+    struct m_Contents *contents;
   };
 } m_Attr;
 
@@ -52,12 +52,31 @@ typedef struct m_Elt {
   uint8_t flags;
 } m_Elt;
 
+typedef enum m_ContentType {
+  CT_CONSTANT, CT_NAME
+} m_ContentType;
+
+
+/* Text content that is either a constant, or a name */
+typedef struct m_Content {
+  size_t id;
+  uint8_t type;
+} m_Content;
+
+/* Dynamic array of contents */
+typedef struct m_Contents {
+  size_t contents_count;
+  size_t contents_capacity;
+  m_Content *contents;
+  char separator; // char to separate, like ' ' for class list, 0 for none
+} m_Contents;
+
 /* An HTML element or text node, has attributes and children */
 typedef struct m_Node {
   m_NodeType type;
   union {
     m_Elt elt;
-    str content; // for text nodes
+    m_Contents *contents; // for text nodes
   };
 } m_Node;
 
@@ -66,8 +85,27 @@ typedef struct m_Template {
   str *constants;
   size_t constants_count;
   size_t constants_capacity;
+
+  // all variable names, you can refer to variables via idx
+  size_t *name_idx;
+  str *names;
+  size_t names_count;
+  size_t names_capacity;
+
+
   m_Node *root;
 } m_Template;
+
+typedef struct m_Binding {
+  Datum data;
+  Oid type;
+} m_Binding;
+
+
+/* Render time bindings for different names. */
+typedef struct m_Scope {
+  m_Binding *values; // binding by name idx
+} m_Scope;
 
 /**
  * Parse the given input, returns the root node.
@@ -78,13 +116,13 @@ typedef struct m_Template {
 m_Template *muggin_parse(Alloc *a, str input);
 
 /**
- * Write template as HTML to given file.
- */
-void muggin_print_html(FILE *to, m_Template *t);
-
-/**
  * Render to string.
  */
 void muggin_render(m_Template *t, Alloc *a, str *to);
+
+/**
+ * Free all allocations in the template.
+ */
+//void muggin_free(m_Template *t, Alloc *a);
 
 #endif //muggin_h

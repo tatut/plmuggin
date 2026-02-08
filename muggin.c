@@ -1,3 +1,5 @@
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "muggin.h"
@@ -20,63 +22,135 @@ typedef struct _ctx {
 } _ctx;
 
 #define CONSTANT(t, idx) ((t)->constants[(t)->constant_idx[(idx)]])
+#define NAME(t, idx) ((t)->names[(t)->name_idx[(idx)]])
+
+/* Signatures */
+
+
+static bool muggin_contents_from_str(_ctx *ctx, str s, m_Contents *contents);
+static bool _grow(_ctx *ctx, size_t *count, size_t *capacity, void **array,
+                  size_t sz);
+static size_t string_pool_idx(_ctx *ctx, str *pool, size_t *idxs, size_t count, size_t capacity, str s);
+static size_t string_pool_use(_ctx *ctx, size_t **idx, str **pool,
+                              size_t *count, size_t *capacity, str s);
+static size_t muggin_use_constant(_ctx *ctx, str constant);
+static size_t muggin_use_name(_ctx *ctx, str name);
+static int muggin_read_indent(_ctx *ctx);
+static bool muggin_check_indent(_ctx *ctx, int expected);
+static bool valid_tag(char ch, bool first);
+static bool valid_attr(char ch, bool first);
+static bool valid_id(char ch, bool first);
+static bool valid_class(char ch, bool first);
+static bool is_void_element(str tag);
+static bool muggin_read_constant(_ctx *ctx, bool (*valid)(char, bool),
+                                 size_t *ref);
+static void muggin_add_attribute(_ctx *ctx, m_Node *n, m_Attr attr);
+static void muggin_add_child(_ctx *ctx, m_Node *n, m_Node child);
+static bool muggin_read_attribute(_ctx *ctx, m_Attr *attr);
+static bool muggin_contents_add(_ctx *ctx, m_Contents *contents,
+                                m_ContentType type, size_t id);
+static bool muggin_contents_add_str(_ctx *ctx, m_Contents *contents,
+                                    m_ContentType type, str content);
+static bool muggin_contents_from_str(_ctx *ctx, str s, m_Contents *contents);
+static bool muggin_parse_node(_ctx *ctx, m_Node **to);
+m_Template *muggin_parse(Alloc *a, str input);
+void muggin_render_contents(m_Template *t, m_Contents *contents, strbuf *sb);
+void muggin_render_node(m_Template *t, m_Node *n, strbuf *sb);
+void muggin_render(m_Template *t, Alloc *a, str *to);
+
+
+
+
+
+
+// grow dynamic array if needed
+static bool _grow(_ctx *ctx, size_t *count, size_t *capacity, void **array, size_t sz) {
+  if(*count == *capacity) {
+    size_t new_capacity = *capacity ? *capacity * 1.618 : 64;
+    void *new_array = REALLOC(ctx->a, *array, new_capacity * sz);
+    if(!new_array) {
+      LOG_ERROR("Failed to reallocate dynamic array, capacity %zu => %zu", *capacity, new_capacity);
+      return false;
+    }
+    *capacity = new_capacity;
+    *array = new_array;
+  }
+  return true;
+}
+
+static size_t string_pool_idx(_ctx *ctx, str *pool, size_t *idxs, size_t count, size_t capacity, str s) {
+  size_t num = count;
+  uint64_t idx = str_hash(s) % capacity;
+ again:
+  if(str_eq(pool[idx], s)) {
+    // we already have an entry, return idx
+    for(size_t i=0;i<count;i++) {
+      if(idxs[i] == idx) return i;
+    }
+    LOG_ERROR("Bug in string pool hashing!, existing entry idx not found");
+  } else if(!pool[idx].len) {
+    // free slot
+    idxs[num] = idx;
+    pool[idx] = str_dup(ctx->a, s);
+    return num;
+  }
+  idx = (idx + 1) % capacity;
+  goto again;
+}
+ 
+ 
+static size_t string_pool_use(_ctx *ctx, size_t **idx, str **pool, size_t *count,
+                              size_t *capacity, str s) {
+  size_t id;
+  if(*count == *capacity) {
+    size_t *old_idx = *idx;
+    str *old_pool = *pool;
+    size_t old_count = *count;
+    size_t new_capacity = *capacity ? *capacity * 1.618 : 64;
+    size_t *new_idx = NEW_ARR(ctx->a, size_t, new_capacity);
+    str *new_pool = NEW_ARR(ctx->a, str, new_capacity);
+    if(!new_idx || !new_pool) {
+      LOG_ERROR("String pool rehash alloc failed, new_capacity=%zu", new_capacity);
+    }
+    bzero(new_pool, sizeof(str)*new_capacity);
+    *idx = new_idx;
+    *pool = new_pool;
+    *capacity = new_capacity;
+    for(size_t i=0;i<old_count;i++) {
+      string_pool_idx(ctx, *pool, *idx, i, *capacity, old_pool[old_idx[i]]);
+      FREE(ctx->a, old_pool[old_idx[i]].data);
+    }
+    FREE(ctx->a, old_pool);
+    FREE(ctx->a, old_idx);
+    *count = old_count;
+  }
+ 
+  id = string_pool_idx(ctx, *pool, *idx, *count, *capacity, s);
+  *count += 1;
+  //LOG_NOTICE("string pool (%zu) = %.*s", id, (int) s.len, s.data);
+  return id;
+}
 
 /* (re)use constant, returns index */
 static size_t muggin_use_constant(_ctx *ctx, str constant) {
-  size_t constant_num = ctx->t->constants_count;
-  //printf(STR_FMT" constant num: %ld\n", STR_ARG(constant), constant_num);
-  if(ctx->t->constants_count == ctx->t->constants_capacity) {
-    //printf("REHASHING!\n");
-    size_t *old_idx = ctx->t->constant_idx;
-    str *old_str = ctx->t->constants;
-    size_t old_count = ctx->t->constants_count;
-    size_t new_capacity = ctx->t->constants_capacity ? ctx->t->constants_capacity * 2 : 64;
-    size_t *new_idx = NEW_ARR(ctx->a, size_t, new_capacity);
-    str *new_str = NEW_ARR(ctx->a, str, new_capacity);
-    if(!new_idx || !new_str) {
-      LOG_ERROR("Constant hashtable rehash alloc failed, new_capacity=%zu", new_capacity);
-    }
-    bzero(new_str, sizeof(str)*new_capacity);
-    ctx->t->constant_idx = new_idx;
-    ctx->t->constants = new_str;
-    ctx->t->constants_capacity = new_capacity;
-    ctx->t->constants_count = 0;
-
-    for(size_t i=0;i<old_count;i++) {
-      muggin_use_constant(ctx, old_str[old_idx[i]]);
-      FREE(ctx->a, &old_str[old_idx[i]]);
-    }
-    FREE(ctx->a, old_str);
-    FREE(ctx->a, old_idx);
-
-  }
-  uint64_t idx = str_hash(constant) % ctx->t->constants_capacity;
- again:
-  if(str_eq(ctx->t->constants[idx], constant)) {
-    // we already have this entry, return constant_idx that has this idx
-    for(size_t i=0;i < ctx->t->constants_count; i++) {
-      if(ctx->t->constant_idx[i] == idx) return i;
-    }
-    LOG_ERROR("Bug in constant hashtable!");
-  } else if(!ctx->t->constants[idx].len) {
-
-    // free slot!
-    // FIXME: ideally we should rehash here, if ht is full
-    ctx->t->constant_idx[constant_num] = idx;
-    ctx->t->constants[idx] = str_dup(ctx->a, constant);
-    ctx->t->constants_count++;
-    return constant_num;
-  }
-  idx = (idx + 1) % ctx->t->constants_capacity;
-  goto again;
-
+  return string_pool_use(ctx, &ctx->t->constant_idx, &ctx->t->constants,
+                         &ctx->t->constants_count, &ctx->t->constants_capacity,
+                         constant);
 }
+
+static size_t muggin_use_name(_ctx *ctx, str name) {
+  return string_pool_use(ctx, &ctx->t->name_idx, &ctx->t->names,
+                         &ctx->t->names_count, &ctx->t->names_capacity,
+                         name);
+}
+
 
 static int muggin_read_indent(_ctx *ctx) {
   int indent = 0;
+  char ch;
  next:
   if (!ctx->input.len) return indent;
-  char ch = ctx->input.data[0];
+  ch = ctx->input.data[0];
   switch (ch) {
   case ' ': indent += 1; break;
   case '\t': indent += 8; break;
@@ -88,8 +162,11 @@ static int muggin_read_indent(_ctx *ctx) {
 }
 
 static bool muggin_check_indent(_ctx *ctx, int expected) {
-  str orig_input = ctx->input;
-  int actual = muggin_read_indent(ctx);
+  str orig_input;
+  int actual;
+  
+  orig_input = ctx->input;
+  actual = muggin_read_indent(ctx);
   if(expected == actual) {
     return true;
   } else {
@@ -132,16 +209,21 @@ static bool is_void_element(str tag) {
 }
 
 static bool muggin_read_constant(_ctx *ctx, bool (*valid)(char,bool), size_t *ref) {
-  str orig = ctx->input;
-  int len = 0;
-  bool first = true;
+  str orig;
+  int len;
+  bool first;
+  str constant;
+  
+  orig = ctx->input;
+  len = 0;
+  first = true;
   while(ctx->input.len && valid(ctx->input.data[0], first)) {
     first = false;
     len++;
     ctx->input = str_drop(ctx->input, 1);
   }
   if(len > 0) {
-    str constant = str_take(orig, len);
+    constant = str_take(orig, len);
     *ref = muggin_use_constant(ctx, constant);
     //printf("CONSTANT(#%zu): '"STR_FMT"'\n", *ref, STR_ARG(constant));
     return true;
@@ -155,19 +237,9 @@ static void muggin_add_attribute(_ctx *ctx, m_Node *n, m_Attr attr) {
   if(n->type == NODE_TEXT) {
     LOG_ERROR("Can't add attributes to text nodes!");
   } else {
-    if(n->elt.attributes_count == n->elt.attributes_capacity) {
-      size_t new_capacity = n->elt.attributes_capacity ? n->elt.attributes_capacity * 2 : 8;
-      m_Attr *new_attrs = NEW_ARR(ctx->a, m_Attr, new_capacity);
-      if(!new_attrs) {
-        LOG_ERROR("Can't add attribute: allocation failed");
-      }
-      if(n->elt.attributes) {
-        memcpy(new_attrs, n->elt.attributes, n->elt.attributes_capacity);
-        FREE(ctx->a, n->elt.attributes);
-      }
-      n->elt.attributes_capacity = new_capacity;
-      n->elt.attributes = new_attrs;
-    }
+    if(!_grow(ctx, &n->elt.attributes_count, &n->elt.attributes_capacity,
+              (void**) &n->elt.attributes, sizeof(m_Attr))) return;
+    LOG_NOTICE("adding attr "STR_FMT, STR_ARG(CONSTANT(ctx->t, attr.name)));
     n->elt.attributes[n->elt.attributes_count++] = attr;
   }
 }
@@ -194,9 +266,12 @@ static void muggin_add_child(_ctx *ctx, m_Node *n, m_Node child) {
 }
 
 static bool muggin_read_attribute(_ctx *ctx, m_Attr *attr) {
+  str val, rest;
+  size_t name;
+  
   ctx->input = str_ltrim(ctx->input);
   if(str_char_at(ctx->input, 0) == ')') return false;
-  size_t name;
+  
   if(!muggin_read_constant(ctx, valid_attr, &name)) {
     PARSE_ERROR(ctx, "Expected attribute name.");
   }
@@ -210,7 +285,7 @@ static bool muggin_read_attribute(_ctx *ctx, m_Attr *attr) {
   // PENDING: should read numbers as well
   if(str_char_at(ctx->input, 0) == '"') {
     ctx->input = str_drop(ctx->input, 1);
-    str val, rest;
+    
     if(str_splitat(ctx->input, "\"", &val, &rest)) {
       attr->type = AT_STRING;
       attr->str_value = str_dup(ctx->a, val);
@@ -220,7 +295,7 @@ static bool muggin_read_attribute(_ctx *ctx, m_Attr *attr) {
       PARSE_ERROR(ctx, "Unterminated quoted string");
     }
   } else {
-    str val, rest;
+    str val;
     size_t len=0;
     char ch;
     do {
@@ -228,26 +303,99 @@ static bool muggin_read_attribute(_ctx *ctx, m_Attr *attr) {
     } while(ch != ' ' && ch != '\t' && ch != '\n' && ch != ')');
     val = str_take(ctx->input, len-1);
     ctx->input = str_drop(ctx->input, ch == ')' ? len-1 : len); // leave ')' in input
-    attr->type = AT_STRING;
-    attr->str_value = str_dup(ctx->a, val);
+    attr->type = AT_CONTENTS;
+    muggin_contents_from_str(ctx, val, attr->contents);
+    
     return true;
   }
 
  fail:
   return false;
+ }
+
+static bool muggin_contents_add(_ctx *ctx, m_Contents *contents,
+                                m_ContentType type, size_t id) {
+  m_Content add;
+  if(!_grow(ctx, &contents->contents_count, &contents->contents_capacity,
+            (void**)&contents->contents, sizeof(m_Content))) {
+    return false;
+  }
+  add = (m_Content){.type = type, .id = id};
+  contents->contents[contents->contents_count++] = add;
+  return true;
+  
 }
+
+static bool muggin_contents_add_str(_ctx *ctx, m_Contents *contents,
+                                    m_ContentType type, str content) {
+  switch(type) {
+  case CT_CONSTANT: return muggin_contents_add(ctx, contents, type,
+                                               muggin_use_constant(ctx, content));
+  case CT_NAME: return muggin_contents_add(ctx, contents, type,
+                                           muggin_use_name(ctx, content));
+  }
+  return false;
+}
+/* Read contents, that can contain {{ mustache }} references to variables. */ 
+static bool muggin_contents_from_str(_ctx *ctx, str s, m_Contents *contents) {
+  int idx;
+  str name;
+  
+  *contents = (m_Contents){0};
+ again:
+  idx = str_indexof(s, '{');
+  if(idx != -1 && str_char_at(s, idx+1) == '{') {
+    // found "{{" append content before it as constant
+    if(!idx) {
+      if(!muggin_contents_add_str(ctx, contents, CT_CONSTANT, str_take(s, idx)))
+        return false;
+      s = str_drop(s, idx);
+    }
+    // drop the "{{" and trim it
+    s = str_ltrim(str_drop(s, 2));
+    // find the end "}}"
+    idx = str_indexof(s, '}');
+    if(idx == -1 || str_char_at(s, idx+1) != '}') {
+      LOG_ERROR("Expected '}}' end in variable reference");
+      return false;
+    }
+    name = str_rtrim(str_take(s, idx));
+    s = str_drop(s, idx+1);
+    if(!muggin_contents_add_str(ctx, contents, CT_NAME, name))
+      return false;
+
+    goto again;
+  } else if(s.len) {
+    if(!muggin_contents_add_str(ctx, contents, CT_CONSTANT, s))
+      return false;
+  }  
+  return true;
+}
+ 
 static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
+  str line, rest;
+  bool has_id;
+  size_t id_constant;
+  int classes;
+  m_Node *n;
+  size_t tag;
+  size_t class_constants[64]; // 64 ought to be enough, even for tailwind users? ;)
+  size_t class, id;
+  int current_indent;
+  m_Node *child;
+  str content;
+  m_Attr attr;
+  
   // new node starts on a fresh line, we expect indent
   if(!muggin_check_indent(ctx, ctx->indent)) return false;
 
-  m_Node *n = NULL;
-  size_t tag;
+  n = NULL;
+
   if(str_char_at(ctx->input, 0) == '|') {
     ctx->input = str_trim(str_drop(ctx->input, 1));
     // text node
     n = NEW(ctx->a, m_Node);
     n->type = NODE_TEXT;
-    str line, rest;
     if(str_splitat(ctx->input, "\n", &line, &rest)) {
       line = str_trim(line);
       ctx->input = rest;
@@ -255,7 +403,7 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
       line = str_trim(ctx->input);
       ctx->input = STR_EMPTY;
     }
-    n->content = str_dup(ctx->a, line);
+    if(!muggin_contents_from_str(ctx, line, n->contents)) return false;
     *to = n;
     return true;
   } else if(muggin_read_constant(ctx, valid_tag, &tag)) {
@@ -266,10 +414,9 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
       n->elt.flags |= EF_VOID;
     }
     // check #id or .class definitions
-    bool has_id = false;
-    size_t id_constant;
-    int classes = 0;
-    size_t class_constants[64]; // 64 ought to be enough, even for tailwind users? ;)
+    has_id = false;
+    classes = 0;
+    
   id_or_class:
     switch(str_char_at(ctx->input, 0)) {
     case '#': {
@@ -284,7 +431,6 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
       goto id_or_class;
     }
     case '.': {
-      size_t class;
       ctx->input = str_drop(ctx->input, 1);
       if(!muggin_read_constant(ctx, valid_class, &class)) {
         PARSE_ERROR(ctx, "Parse error: cant read .<class> in element name.");
@@ -299,25 +445,32 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
     }
 
     if(has_id) {
-      size_t id = muggin_use_constant(ctx, str_constant("id"));
-      size_t *ids = NEW(ctx->a, size_t);
-      ids[0] = id_constant;
-      muggin_add_attribute(ctx, n, (m_Attr) {.name = id, .type = AT_CONSTANTS,
-                                             .constants_value = {.constants_count = 1, .constants = ids}});
+      id = muggin_use_constant(ctx, str_constant("id"));
+      muggin_add_attribute(ctx, n, (m_Attr) {.name = id, .type = AT_CONSTANT,
+                                             .constant = id_constant});
     }
     if(classes) {
       // add attribute
-      size_t class = muggin_use_constant(ctx, str_constant("class"));
-      size_t *class_names = NEW_ARR(ctx->a, size_t, classes);
-      memcpy(class_names, class_constants, sizeof(size_t)*classes);
-      muggin_add_attribute(ctx, n, (m_Attr) {.name = class, .type = AT_CONSTANTS,
-                                             .constants_value = {.constants_count = classes, .constants = class_names }});
+      class = muggin_use_constant(ctx, str_constant("class"));
+      if(classes == 1) {
+        // only 1 constant
+        muggin_add_attribute(ctx, n, (m_Attr) {.name = class, .type = AT_CONSTANT,
+                                               .constant = class_constants[0]});
+      } else {
+        // multiple classes separated by ' '
+        m_Contents *contents = NEW(ctx->a, m_Contents);
+        *contents = (m_Contents){.separator = ' '};
+        for(size_t i=0; i < classes; i++) {
+          muggin_contents_add(ctx, contents, CT_CONSTANT, class_constants[i]);
+        }
+        muggin_add_attribute(ctx, n, (m_Attr) {.name = class, .type = AT_CONTENTS,
+                                               .contents = contents});
+      }
     }
 
     // parse attributes, if any
     if(str_char_at(ctx->input, 0) == '(') {
       ctx->input = str_drop(ctx->input, 1);
-      m_Attr attr;
       while(muggin_read_attribute(ctx, &attr)) {
         muggin_add_attribute(ctx, n, attr);
       }
@@ -327,7 +480,6 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
       ctx->input = str_drop(ctx->input, 1);
     }
     // rest of the line is simple content
-    str content, rest;
     if(str_splitat(ctx->input, "\n", &content, &rest)) {
       content = str_trim(content);
       ctx->input = rest;
@@ -337,14 +489,18 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
     }
     if(content.len) {
       //printf("add text child: "STR_FMT"\n", STR_ARG(content));
-      muggin_add_child(ctx, n, (m_Node){.type = NODE_TEXT, .content = content});
+      m_Contents *contents = NEW(ctx->a, m_Contents);
+      muggin_contents_from_str(ctx, content, contents);
+      muggin_add_child(ctx, n, (m_Node){
+          .type = NODE_TEXT,
+          .contents = contents
+        });
     }
 
 
     // parse child elements at indent+2
-    int current_indent = ctx->indent;
+    current_indent = ctx->indent;
     ctx->indent += 2;
-    m_Node *child;
     while(muggin_parse_node(ctx, &child)) {
       //printf("adding ELEMENT child: "STR_FMT"\n", STR_ARG(CONSTANT(ctx->t, child->elt.tag)));
       muggin_add_child(ctx, n, *child);
@@ -365,34 +521,53 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
 }
 
 m_Template *muggin_parse(Alloc *a, str input) {
-  m_Template *t = NEW(a, m_Template);
+  m_Template *t;
+  _ctx ctx;
+  
+  t = NEW(a, m_Template);
   t->constant_idx = NEW_ARR(a, size_t, 64);
   t->constants = NEW_ARR(a, str, 64);
   bzero(t->constants, sizeof(str)*64);
   t->constants_capacity = 64;
   t->constants_count = 0;
 
-  int indent = 0;
-  _ctx ctx = (_ctx){.a = a, .t = t, .indent = 0, .input = input};
-  m_Node *root;
+
+  ctx = (_ctx){.a = a, .t = t, .indent = 0, .input = input};
   if(muggin_parse_node(&ctx, &t->root)) {
     return t;
   }
 
- fail:
   if(t) FREE(a, t);
   return NULL;
 }
 
+void muggin_render_contents(m_Template *t, m_Contents *contents, strbuf *sb) {
+  for(size_t i=0;i < contents->contents_count; i++) {
+    if(i && contents->separator) {
+      strbuf_append_char(sb, contents->separator);
+    }
+    switch(contents->contents[i].type) {
+      // FIXME: escape HTML entities!
+    case CT_CONSTANT: strbuf_append_str(sb, CONSTANT(t, contents->contents[i].id)); break;
+    case CT_NAME: strbuf_append_str(sb, str_constant("MUUTTUJA:"));
+      strbuf_append_str(sb, NAME(t, contents->contents[i].id));
+      break;
+    }
+  }
+}
 
 void muggin_render_node(m_Template *t, m_Node *n, strbuf *sb) {
   switch(n->type) {
-  case NODE_TEXT: strbuf_append_str(sb, n->content); break; // FIXME: escape HTML entities!
+  case NODE_TEXT:
+    muggin_render_contents(t, n->contents, sb); break; 
   case NODE_ELEMENT: {
     strbuf_append_char(sb, '<');
     strbuf_append_str(sb, CONSTANT(t, n->elt.tag));
-    for(int i=0;i<n->elt.attributes_count;i++) {
+    for(size_t i=0;i<n->elt.attributes_count;i++) {
       m_Attr a = n->elt.attributes[i];
+      LOG_NOTICE("(%zu/%zu) attr "STR_FMT" has type %d",
+                 i, n->elt.attributes_count,
+                 STR_ARG(CONSTANT(t, a.name)), a.type);
       switch(a.type) {
       case AT_BOOL: {
         if(a.bool_value) {
@@ -422,23 +597,37 @@ void muggin_render_node(m_Template *t, m_Node *n, strbuf *sb) {
         strbuf_append_str(sb, (str){.len = len, .data = dbl});
         break;
       }
-      case AT_CONSTANTS: {
+      case AT_CONSTANT: {
+        LOG_NOTICE("render constant attr '%.*s' value '%.*s'", STR_ARG(CONSTANT(t,a.name)),
+               STR_ARG(CONSTANT(t, a.constant)));
         strbuf_append_char(sb, ' ');
         strbuf_append_str(sb, CONSTANT(t, a.name));
         strbuf_append_str(sb, str_constant("=\""));
-        for(int i=0;i< a.constants_value.constants_count; i++) {
-          if(i) strbuf_append_char(sb, ' ');
-          strbuf_append_str(sb, CONSTANT(t, a.constants_value.constants[i]));
-        }
+        strbuf_append_str(sb, CONSTANT(t, a.constant));
         strbuf_append_char(sb, '"');
         break;
       }
-        //case AT_MUSTACHE:
-        // expanded values like "width: {{ width }};"
-        // consisting of constants and names!
+      case AT_VARIABLE: {
+        // FIXME: render actual variable!
+        strbuf_append_char(sb, ' ');
+        strbuf_append_str(sb, CONSTANT(t, a.name));
+        strbuf_append_str(sb, str_constant("=\""));
+        strbuf_append_str(sb, str_constant("MUUTTUJA!"));
+        strbuf_append_str(sb, NAME(t, a.variable));
+        strbuf_append_char(sb, '"');
+        break;
       }
-    } // end attributes
-    
+      case AT_CONTENTS: {
+        strbuf_append_char(sb, ' ');
+        strbuf_append_str(sb, CONSTANT(t, a.name));
+        strbuf_append_str(sb, str_constant("=\""));
+        muggin_render_contents(t, a.contents, sb);
+        strbuf_append_char(sb, '"');
+        break;
+      }
+    }
+    }// end attributes
+
     strbuf_append_char(sb, '>');
     if(!(n->elt.flags & EF_VOID)) {
       // recurse into children, unless this is a void element
@@ -449,7 +638,6 @@ void muggin_render_node(m_Template *t, m_Node *n, strbuf *sb) {
       strbuf_append_str(sb, CONSTANT(t, n->elt.tag));
       strbuf_append_char(sb, '>');
     }
-    break;
   }
   }
 }
@@ -463,55 +651,27 @@ void muggin_render(m_Template *t, Alloc *a, str *to) {
   FREE(a, sb); // free buffer struct
 }
 
-void muggin_print_node(FILE *to, m_Template *t, m_Node *n) {
+/*
+static void muggin_free_node(Alloc *a, m_Node *n) {
   switch(n->type) {
-  case NODE_TEXT: fprintf(to, STR_FMT, STR_ARG(n->content)); break; // FIXME: escape HTML entities in parse phase?
-  case NODE_ELEMENT:
-    fprintf(to, "<"STR_FMT, STR_ARG(CONSTANT(t, n->elt.tag)));
-    for(int i = 0; i < n->elt.attributes_count; i++) {
-      m_Attr a = n->elt.attributes[i];
-      switch(a.type) {
-      case AT_BOOL: if(a.bool_value) {
-          fprintf(to, " "STR_FMT, STR_ARG(CONSTANT(t, a.name)));
-          break;
-        }
-      case AT_STRING: fprintf(to, " "STR_FMT"=\""STR_FMT"\"", STR_ARG(CONSTANT(t, a.name)), STR_ARG(a.str_value)); break;
-      case AT_INT: fprintf(to, " "STR_FMT"=\"%lld\"", STR_ARG(CONSTANT(t, a.name)), a.int_value); break;
-      case AT_DOUBLE: fprintf(to, " "STR_FMT"=\"%lf\"", STR_ARG(CONSTANT(t, a.name)), a.double_value); break;
-      case AT_CONSTANTS: {
-        fprintf(to, " "STR_FMT"=\"", STR_ARG(CONSTANT(t, a.name)));
-        for(int i=0;i< a.constants_value.constants_count; i++) {
-          if(i) fprintf(to, " ");
-          fprintf(to, STR_FMT, STR_ARG(CONSTANT(t, a.constants_value.constants[i])));
-        }
-        fprintf(to, "\"");
-        break;
-      }
-      }
-    }
-    fprintf(to, ">");
-    if(!(n->elt.flags & EF_VOID)) {
-      for(int i = 0; i < n->elt.children_count; i++) {
-        muggin_print_node(to, t, &n->elt.children[i]);
-      }
-      fprintf(to, "</"STR_FMT">", STR_ARG(CONSTANT(t, n->elt.tag)));
-    }
+  case NODE_TEXT: {
+    FREE(a, n->contents->contents);
+    FREE(a, n->contents);
     break;
   }
-}
+  case NODE_ELEMENT: {
+    for(size_t i=0;i<n->elt.attributes_count; i++) {
+      muggin_free_attr(a, n->elt.attributes[i]);
+    }
+    FREE(a, n->elt.attributes);
+  }
 
-void muggin_print_html(FILE *to, m_Template *t) {
-  fprintf(to, "<!DOCTYPE html>\n");
-  muggin_print_node(to, t, t->root);
-  fflush(to);
-}
 
-/*
-int main(int argc, char **argv) {
-  str f = str_from_file(&a, "test/simple.mug");
-  printf("GOT: "STR_FMT"\n", STR_ARG(f));
-  m_Template *t = muggin_parse(&a, f);
-  muggin_print_html(stdout, t);
-  return 0;
+  }
 }
+void muggin_free(m_Template *t, Alloc *a) {
+   string_pool_free(a, t->constants, t->constants_count);
+   string_pool_free(a, t->names, t->names_count);
+   muggin_free_node(a, t->root);
+ }
 */

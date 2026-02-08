@@ -1,5 +1,5 @@
 MODULE_big = plmuggin
-OBJS = plmuggin.o muggin.o
+OBJS = plmuggin.o muggin.o pool.o
 EXTENSION = plmuggin
 DATA = plmuggin--0.1.sql
 PGFILEDESC = "PL/Muggin - muggin HTML templating language"
