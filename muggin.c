@@ -97,7 +97,7 @@ static size_t string_pool_idx(_ctx *ctx, str *pool, size_t *idxs, size_t count, 
   idx = (idx + 1) % capacity;
   goto again;
 }
- 
+
  
 static size_t string_pool_use(_ctx *ctx, size_t **idx, str **pool, size_t *count,
                               size_t *capacity, str s) {

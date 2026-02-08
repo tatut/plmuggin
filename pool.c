@@ -67,11 +67,13 @@ static void pool_free(Alloc *a, void *mem) {
 }
 
 void pool_release(Alloc *a) {
+  Pool *p;
+  PEntry *entry, *prev;
   LOG_NOTICE("pool_release");
-  Pool *p = a->user;
-  PEntry *entry = p->last;
+  p = a->user;
+  entry = p->last;
   while(entry) {
-    PEntry *prev = entry->prev;
+    prev = entry->prev;
     pfree(entry);
     entry = prev;
   }

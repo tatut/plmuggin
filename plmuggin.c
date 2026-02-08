@@ -155,5 +155,5 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
 
 }
 
-void log_error(const char *error) { elog(ERROR, error); }
-void log_notice(const char *notice) { elog(NOTICE, notice); }
+void log_error(const char *error) { elog(ERROR, "%s", error); }
+void log_notice(const char *notice) { elog(NOTICE, "%s", notice); }
