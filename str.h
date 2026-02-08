@@ -284,13 +284,13 @@ bool strbuf_ensure(strbuf *buf, size_t space_needed) {
 
   min_capacity = buf->str.len + space_needed;
   if(buf->capacity < min_capacity) {
-    LOG_NOTICE("%ld - %ld < %ld, realloc", buf->capacity, buf->str.len, space_needed);
     new_capacity = buf->capacity * 1.618; // grow by golden ratio
     if(new_capacity < min_capacity) {
       new_capacity = min_capacity;
     }
+    //LOG_NOTICE("%ld - %ld < %ld, realloc to %zu", buf->capacity, buf->str.len, space_needed, new_capacity);
 
-    new_data = REALLOC(buf->alloc, buf->str.data, buf->capacity);
+    new_data = REALLOC(buf->alloc, buf->str.data, new_capacity);
     if(!new_data) {
       LOG_ERROR("Failed to realloc string buffer from size %zu to %zu", buf->capacity, new_capacity);
       return false;
