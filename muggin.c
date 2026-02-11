@@ -287,8 +287,10 @@ static bool muggin_read_attribute(_ctx *ctx, m_Attr *attr) {
     ctx->input = str_drop(ctx->input, 1);
     
     if(str_splitat(ctx->input, "\"", &val, &rest)) {
-      attr->type = AT_STRING;
-      attr->str_value = str_dup(ctx->a, val);
+      attr->type = AT_CONTENTS;
+      attr->contents = NEW(ctx->a, m_Contents);
+      if(!muggin_contents_from_str(ctx, val, attr->contents))
+        return false;
       ctx->input = rest;
       return true;
     } else {
@@ -304,6 +306,7 @@ static bool muggin_read_attribute(_ctx *ctx, m_Attr *attr) {
     val = str_take(ctx->input, len-1);
     ctx->input = str_drop(ctx->input, ch == ')' ? len-1 : len); // leave ')' in input
     attr->type = AT_CONTENTS;
+    attr->contents = NEW(ctx->a, m_Contents);
     muggin_contents_from_str(ctx, val, attr->contents);
     
     return true;
@@ -328,6 +331,7 @@ static bool muggin_contents_add(_ctx *ctx, m_Contents *contents,
 
 static bool muggin_contents_add_str(_ctx *ctx, m_Contents *contents,
                                     m_ContentType type, str content) {
+  LOG_NOTICE("str cont (%d) => "STR_FMT, type, STR_ARG(content)); 
   switch(type) {
   case CT_CONSTANT: return muggin_contents_add(ctx, contents, type,
                                                muggin_use_constant(ctx, content));
@@ -346,7 +350,9 @@ static bool muggin_contents_from_str(_ctx *ctx, str s, m_Contents *contents) {
   idx = str_indexof(s, '{');
   if(idx != -1 && str_char_at(s, idx+1) == '{') {
     // found "{{" append content before it as constant
-    if(!idx) {
+    LOG_NOTICE("found '{{' at idx: %d", idx);
+    if(idx > 0) {
+      LOG_NOTICE("before var: '"STR_FMT"'", STR_ARG(str_take(s,idx)));
       if(!muggin_contents_add_str(ctx, contents, CT_CONSTANT, str_take(s, idx)))
         return false;
       s = str_drop(s, idx);
@@ -360,6 +366,7 @@ static bool muggin_contents_from_str(_ctx *ctx, str s, m_Contents *contents) {
       return false;
     }
     name = str_rtrim(str_take(s, idx));
+    LOG_NOTICE("var name '"STR_FMT"'", STR_ARG(name));
     s = str_drop(s, idx+1);
     if(!muggin_contents_add_str(ctx, contents, CT_NAME, name))
       return false;
@@ -471,6 +478,7 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
     // parse attributes, if any
     if(str_char_at(ctx->input, 0) == '(') {
       ctx->input = str_drop(ctx->input, 1);
+      attr = (m_Attr){0};
       while(muggin_read_attribute(ctx, &attr)) {
         muggin_add_attribute(ctx, n, attr);
       }
