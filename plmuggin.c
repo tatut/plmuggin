@@ -45,7 +45,6 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   char *proname, *source;
   Datum ret;
   bool isnull;
-  volatile MemoryContext proc_ctx = NULL;
   FmgrInfo *arg_out_func;
   int numargs;
   char **argnames, *argmodes;
@@ -76,8 +75,6 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
 
   source = DatumGetCString(DirectFunctionCall1(textout, ret));
 
-  proc_ctx = AllocSetContextCreate(TopMemoryContext, "PL/Muggin function",
-                                   ALLOCSET_START_SMALL_SIZES);
   arg_out_func = (FmgrInfo*) palloc0(fcinfo->nargs * sizeof(FmgrInfo));
   numargs = get_func_arg_info(fn_pg_proc, &argtypes, &argnames, &argmodes);
 
@@ -105,7 +102,7 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
       elog(ERROR, "cache lookup failed for type %u", argtype);
 
     type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
-    fmgr_info_cxt(type_struct->typoutput, &(arg_out_func[i]), proc_ctx);
+    fmgr_info(type_struct->typoutput, &(arg_out_func[i]));
     ReleaseSysCache(type_tuple);
 
     value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
@@ -126,7 +123,7 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   pg_type_entry = (Form_pg_type) GETSTRUCT(ret_type_tuple);
   result_typioparam = getTypeIOParam(ret_type_tuple);
 
-  fmgr_info_cxt(pg_type_entry->typinput, &result_in_func, proc_ctx);
+  fmgr_info(pg_type_entry->typinput, &result_in_func);
   ReleaseSysCache(ret_type_tuple);
 
   rendered = strbuf_new();
