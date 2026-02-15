@@ -2,7 +2,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+
 #include "muggin.h"
+#include "postgres.h"
+#include "executor/spi.h"
+#include "utils/lsyscache.h"
 
 #define STR_IMPLEMENTATION
 #include "str.h"
@@ -24,6 +28,9 @@ typedef struct _ctx {
 typedef struct _rctx {
   m_Template *t;
   m_Scope *scope;
+  bool has_query; // if "m:q" attribute is present
+  size_t mq_idx; // "m:q" attribute index
+  m_Node *mq; // recursive call handling query, don't handle it again
 } _rctx;
 
 #define CONSTANT(t, idx) ((t)->constants[(t)->constant_idx[(idx)]])
@@ -66,7 +73,7 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to);
 m_Template *muggin_parse(str input);
 void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb);
 void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb);
-
+static int query(_rctx *ctx, m_Contents *contents);
 
 
 
@@ -226,6 +233,7 @@ static bool valid_tag(char ch, bool first) {
 }
 
 static bool valid_attr(char ch, bool first) {
+  if(ch == ':' && !first) return true; // allow ':' in attr name (for namespace)
   return valid_tag(ch, first); // so far they are the same
 }
 
@@ -624,15 +632,74 @@ void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb) {
   }
 }
 
+static int query(_rctx *ctx, m_Contents *contents) {
+  strbuf *sb;
+  int nargs;
+  Datum *values;
+  Oid *argtypes;
+  int result;
+
+  // we don't know the exact argument count, but it's at most the contents count
+  nargs = 0;
+  values = NEW_ARR(Datum, contents->contents_count);
+  argtypes = NEW_ARR(Oid, contents->contents_count);
+
+  sb = strbuf_new();
+
+  for(size_t i=0;i < contents->contents_count; i++) {
+    if(i && contents->separator) {
+      strbuf_append_char(sb, contents->separator);
+    }
+    switch(contents->contents[i].type) {
+    case CT_CONSTANT:
+      strbuf_append_str(sb, CONSTANT(ctx->t, contents->contents[i].id));
+      break;
+    case CT_NAME: {
+      m_Binding b;
+      b = ctx->scope->values[contents->contents[i].id];
+      LOG_DEBUG("idx: %zu, b.flags = %d", contents->contents[i].id, b.flags);
+      if(b.flags & BF_HAS_VALUE) {
+        char *v;
+        argtypes[nargs] = TEXTOID;
+        v = str_to_cstr(b.value); // FIXME: actually have oid+datum as bindings
+        values[nargs] = CStringGetDatum(v);
+        strbuf_append_char(sb, '$');
+        nargs += 1;
+        strbuf_append_int(sb, nargs);
+      } else {
+        LOG_ERROR("Missing value needed in query for: "STR_FMT, STR_ARG(NAME(ctx->t, contents->contents[i].id)));
+      }
+      break;
+    }
+    }
+  }
+  strbuf_append_char(sb, 0); // NUL terminate
+  LOG_NOTICE("Running query: %s", sb->str.data);
+  // max 65536 rows
+  result = SPI_execute_with_args(sb->str.data, nargs, argtypes, values, NULL, true, 1<<16);
+  FREE(sb->str.data);
+  FREE(sb);
+  return result;
+}
+
 void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
   switch(n->type) {
   case NODE_TEXT:
     muggin_render_contents(ctx, n->contents, sb); break;
   case NODE_ELEMENT: {
+    int mq_attr;
+    mq_attr = -1;
     strbuf_append_char(sb, '<');
     strbuf_append_str(sb, CONSTANT(ctx->t, n->elt.tag));
     for(size_t i=0;i<n->elt.attributes_count;i++) {
-      m_Attr a = n->elt.attributes[i];
+      m_Attr a;
+      a = n->elt.attributes[i];
+      if(ctx->has_query && n->elt.attributes[i].name == ctx->mq_idx) {
+        // "m:q" is not rendered as an attr, it does a query to loop children
+        LOG_DEBUG("we have a query!");
+        mq_attr = (int) i;
+        continue;
+      }
       LOG_DEBUG("(%zu/%zu) attr "STR_FMT" has type %d",
                  i, n->elt.attributes_count,
                  STR_ARG(CONSTANT(ctx->t, a.name)), a.type);
@@ -699,9 +766,75 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
 
     strbuf_append_char(sb, '>');
     if(!(n->elt.flags & EF_VOID)) {
-      // recurse into children, unless this is a void element
-      for(int i = 0; i < n->elt.children_count; i++) {
-        muggin_render_node(ctx, &n->elt.children[i], sb);
+      if(mq_attr != -1) {
+        // execute query, render children for each row
+        int result;
+        result = query(ctx, n->elt.attributes[mq_attr].contents);
+        if(result < 1 || !SPI_tuptable) {
+          LOG_ERROR("Query failed, result: %d", result);
+        } else {
+          TupleDesc tupdesc;
+          int *varidx;
+
+          // Bind selected items and recurse into children
+          tupdesc = SPI_tuptable->tupdesc;
+          varidx = NEW_ARR(int, tupdesc->natts);
+
+          /* Resolve columns to variables */
+          for(int col = 0; col < tupdesc->natts; col++) {
+              Form_pg_attribute attr;
+              char *name;
+              bool found;
+              size_t idx;
+              attr = TupleDescAttr(tupdesc, col);
+              name = NameStr(attr->attname);
+              idx = muggin_lookup_name(ctx->t, cstr(name), &found);
+              if(found) {
+                varidx[col] = (int) idx;
+              } else {
+                varidx[col] = -1;
+                LOG_NOTICE("Query has column that is not used in template: %s", name);
+              }
+          }
+
+          for(int row = 0; row < SPI_tuptable->numvals; row++) {
+            HeapTuple tuple;
+            tuple = SPI_tuptable->vals[row];
+
+            for(int col = 1; col <= tupdesc->natts; col++) {
+              Datum value;
+              bool isnull;
+              int idx;
+              str strvalue;
+              idx = varidx[col-1];
+              if(idx != -1) {
+                value = SPI_getbinval(tuple, tupdesc, col, &isnull);
+                if(isnull) {
+                  strvalue = (str){.len = 0, .data = NULL};
+                } else {
+                  Oid typoutput;
+                  bool typisvarlena;
+
+                  getTypeOutputInfo(SPI_gettypeid(tupdesc, col),
+                                    &typoutput, &typisvarlena);
+                  strvalue.data = OidOutputFunctionCall(typoutput, value);
+                  strvalue.len = strlen(strvalue.data);
+                }
+                muggin_scope_bind_idx(ctx->scope, idx, strvalue, BF_NEED_ESCAPE);
+              }
+            }
+            /* Render all children */
+            for(int i = 0; i < n->elt.children_count; i++) {
+              muggin_render_node(ctx, &n->elt.children[i], sb);
+            }
+
+          }
+        }
+      } else {
+        // recurse into children, unless this is a void element
+        for(int i = 0; i < n->elt.children_count; i++) {
+          muggin_render_node(ctx, &n->elt.children[i], sb);
+        }
       }
       strbuf_append_str(sb, str_constant("</"));
       strbuf_append_str(sb, CONSTANT(ctx->t, n->elt.tag));
@@ -726,13 +859,18 @@ void muggin_scope_bind(m_Scope *scope, str name, str value, uint8_t flags) {
   if(!found) {
     LOG_NOTICE("Template has no variable named: %.*s", STR_ARG(name));
   } else {
-    LOG_DEBUG("idx %zu bound to "STR_FMT, idx, STR_ARG(value));
-    scope->values[idx] = (m_Binding){
-      .value = value,
-      .flags = flags | BF_HAS_VALUE
-    };
+    muggin_scope_bind_idx(scope, idx, value, flags);
   }
 }
+
+void muggin_scope_bind_idx(m_Scope *scope, size_t idx, str value, uint8_t flags) {
+  LOG_DEBUG("idx %zu bound to "STR_FMT, idx, STR_ARG(value));
+  scope->values[idx] = (m_Binding){
+    .value = value,
+    .flags = flags | BF_HAS_VALUE
+  };
+}
+
 void muggin_scope_unbind(m_Scope *scope, str name) {
   /* FIXME: does nothing, last binding stays in effect even after scope */
 }
@@ -740,11 +878,21 @@ void muggin_scope_unbind(m_Scope *scope, str name) {
 
 bool muggin_render(m_Template *t, m_Scope *scope, strbuf *to) {
   _rctx ctx;
+
   ctx = (_rctx){.t = t, .scope = scope};
+  ctx.mq_idx = string_pool_lookup(t->constants, t->constant_idx, t->constants_count, t->constants_capacity,
+                                  cstr("m:q"), &ctx.has_query);
+  if(ctx.has_query) {
+    if(SPI_connect() != SPI_OK_CONNECT) {
+      LOG_ERROR("SPI connect failed");
+    }
+  }
   strbuf_append_str(to, str_constant("<!DOCTYPE html>\n"));
   muggin_render_node(&ctx, t->root, to);
   strbuf_append_char(to, 0); // NUL terminate to play nice as C string
-
+  if(ctx.has_query) {
+    SPI_finish();
+  }
   return true;
 }
 

@@ -4,5 +4,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - uses: adjust/pg-ext-actions/pg-setup@master
+        with:
+          version: 18
+          install-contrib: 'true'
+
       - uses: actions/checkout@v6
-      - run: ./test.sh
+      - run: make install

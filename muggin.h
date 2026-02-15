@@ -121,6 +121,8 @@ m_Scope *muggin_scope_new(m_Template *tpl);
  */
 void muggin_scope_bind(m_Scope *scope, str name, str value, uint8_t flags);
 
+void muggin_scope_bind_idx(m_Scope *scope, size_t idx, str value, uint8_t flags);
+
 /* Revert to previous binding. */
 void muggin_scope_unbind(m_Scope *scope, str name);
 /**
