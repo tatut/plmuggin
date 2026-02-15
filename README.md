@@ -1,6 +1,8 @@
 # PL/Muggin HTML templating for PostgreSQL
 
-PL/Muggin is a template engine inspired by [pug](https://pugjs.org) defined as a PostgreSQL language handler.
+![test workflow](https://github.com/tatut/plmuggin/actions/workflows/test.yml/badge.svg)
+
+PL/Muggin is a HTML template engine inspired by [pug](https://pugjs.org) defined as a PostgreSQL language handler.
 Muggin templates are whitespace sensitive and look like this:
 
 ```
@@ -12,7 +14,10 @@ div.app
 ```
 
 Muggin can directly do PostgreSQL queries and loop through the results.
-The `m:` attribute namespace is reserver for muggin controls.
+All children of the element that contains `m:q` attribute will be rendered
+for each row, with names in the query result set bound.
+
+The `m:` attribute namespace is reserved for muggin controls.
 Other attributes are HTML.
 
 WIP! This is work in progress... not for production use yet.

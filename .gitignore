@@ -1,3 +1,7 @@
 *.o
 *.dylib
 /.clangd
+/regression.diffs
+/plmuggin.so
+/plmuggin
+/expected/plmuggin_regress.out.orig
