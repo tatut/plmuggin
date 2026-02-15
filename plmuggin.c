@@ -75,7 +75,6 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   }
 
   source = DatumGetCString(DirectFunctionCall1(textout, ret));
-  ereport(NOTICE, (errmsg("fn %s source: %s", proname, source)));
 
   proc_ctx = AllocSetContextCreate(TopMemoryContext, "PL/Muggin function",
                                    ALLOCSET_START_SMALL_SIZES);
@@ -112,9 +111,6 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
     value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
     name = (str){.data = argnames[i], .len = strlen(argnames[i])};
     muggin_scope_bind(scope, name, cstr(value), BF_NEED_ESCAPE);
-
-    ereport(NOTICE, (errmsg("argument: %d; name: %s; value: %s",
-                            i, argnames[i], value)));
   }
   prorettype = pl_struct->prorettype;
   ReleaseSysCache(fn_pg_proc);
