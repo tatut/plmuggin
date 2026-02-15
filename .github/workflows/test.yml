@@ -10,4 +10,6 @@ jobs:
           install-contrib: 'true'
 
       - uses: actions/checkout@v6
-      - run: make install
+      - run: make
+      - run: sudo make install
+      - run: make installcheck
