@@ -96,33 +96,46 @@ typedef struct m_Template {
   m_Node *root;
 } m_Template;
 
+// binding bit flags
+#define BF_NEED_ESCAPE 1<<0
+#define BF_HAS_VALUE 1<<1
+
 typedef struct m_Binding {
-  Datum data;
-  Oid type;
+  str value; // string representation
+  uint8_t flags;
 } m_Binding;
 
 
 /* Render time bindings for different names. */
 typedef struct m_Scope {
+  m_Template *template;
   m_Binding *values; // binding by name idx
 } m_Scope;
 
+/* Allocate a new scope for the given template. */
+m_Scope *muggin_scope_new(m_Template *tpl);
+
+/* Bind value to scope.
+ * Set flag BF_NEED_ESCAPE if HTML entities need to be escaped (like strings).
+ * The BF_HAS_VALUE will be automatically set.
+ */
+void muggin_scope_bind(m_Scope *scope, str name, str value, uint8_t flags);
+
+/* Revert to previous binding. */
+void muggin_scope_unbind(m_Scope *scope, str name);
 /**
  * Parse the given input, returns the root node.
  * Allocates fresh strings so input string can be
  * freed after parse.
  *
  */
-m_Template *muggin_parse(Alloc *a, str input);
+m_Template *muggin_parse(str input);
 
 /**
- * Render to string.
+ * Render to the given string buffer.
+ * Returns true on success.
  */
-void muggin_render(m_Template *t, Alloc *a, str *to);
+bool muggin_render(m_Template *t, m_Scope *scope, strbuf *to);
 
-/**
- * Free all allocations in the template.
- */
-//void muggin_free(m_Template *t, Alloc *a);
 
 #endif //muggin_h

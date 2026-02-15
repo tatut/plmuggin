@@ -6,6 +6,7 @@
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "funcapi.h"
+#include "utils/elog.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -13,31 +14,12 @@
 #include "utils/syscache.h"
 #include "muggin.h"
 #include "env.h"
-#include "pool.h"
 
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(plmuggin_call_handler);
 
 static Datum plmuggin_func_handler(PG_FUNCTION_ARGS);
-
-/* Define allocator that uses PostgreSQL palloc family */
-void *pg_alloc_alloc(Alloc *a, size_t sz);
-void pg_alloc_free(Alloc *a, void *mem);
-void *pg_alloc_realloc(Alloc *a, void *mem, size_t new_size);
-
-void *pg_alloc_alloc(Alloc *a, size_t sz) { return palloc0(sz); }
-void pg_alloc_free(Alloc *a, void *mem) { pfree(mem); }
-void *pg_alloc_realloc(Alloc *a, void *mem, size_t new_size) {
-  return repalloc(mem, new_size);
-}
-
-static Alloc pg_alloc = (Alloc) {
-  .alloc = pg_alloc_alloc,
-  .free = pg_alloc_free,
-  .realloc = pg_alloc_realloc
-};
-
 
 /* plmuggin language handler entrypoint */
 Datum plmuggin_call_handler(PG_FUNCTION_ARGS) {
@@ -76,8 +58,8 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   FmgrInfo result_in_func;
   m_Template *tpl;
   str template;
-  str rendered;
-  Alloc *pool;
+  strbuf *rendered;
+  m_Scope *scope;
 
   fn_pg_proc = SearchSysCache1(PROCOID, ObjectIdGetDatum(fcinfo->flinfo->fn_oid));
   if(!HeapTupleIsValid(fn_pg_proc)) {
@@ -103,17 +85,21 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   /* Load muggin template from source now */
   template = (str) {.data = source, .len = strlen(source) };
 
-  pool = pool_new();
-  tpl = muggin_parse(pool, template);
+  // PENDING: cache loaded templates
+  tpl = muggin_parse(template);
   if(!tpl) {
     elog(ERROR, "Template loading failed.");
   }
+  pfree(source); // FIXME: do we need to free it?
 
+  scope = muggin_scope_new(tpl);
   for(int i=0;i<numargs;i++) {
     // Bind to template names
     Oid argtype;
     char *value;
     HeapTuple type_tuple;
+    str name;
+
     argtype = pl_struct->proargtypes.values[i];
     type_tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(argtype));
     if(!HeapTupleIsValid(type_tuple))
@@ -124,9 +110,11 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
     ReleaseSysCache(type_tuple);
 
     value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
+    name = (str){.data = argnames[i], .len = strlen(argnames[i])};
+    muggin_scope_bind(scope, name, cstr(value), BF_NEED_ESCAPE);
+
     ereport(NOTICE, (errmsg("argument: %d; name: %s; value: %s",
                             i, argnames[i], value)));
-
   }
   prorettype = pl_struct->prorettype;
   ReleaseSysCache(fn_pg_proc);
@@ -145,11 +133,10 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   fmgr_info_cxt(pg_type_entry->typinput, &result_in_func, proc_ctx);
   ReleaseSysCache(ret_type_tuple);
 
-  elog(NOTICE, "going to render now!");
-  muggin_render(tpl, &pg_alloc, &rendered);
-  elog(NOTICE, "rendered template!");
-  ret = InputFunctionCall(&result_in_func, rendered.data, result_typioparam, -1);
-  pool_release(pool);
+  rendered = strbuf_new();
+  muggin_render(tpl, scope, rendered);
+
+  ret = InputFunctionCall(&result_in_func, rendered->str.data, result_typioparam, -1);
 
   PG_RETURN_DATUM(ret);
 
@@ -157,3 +144,4 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
 
 void log_error(const char *error) { elog(ERROR, "%s", error); }
 void log_notice(const char *notice) { elog(NOTICE, "%s", notice); }
+void log_debug(const char *debug) { elog(DEBUG1, "%s", debug); }

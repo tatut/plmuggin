@@ -1,19 +1,17 @@
 #ifndef alloc_h
 #define alloc_h
-#include <stdint.h>
 
-typedef struct Alloc {
-  void* (*alloc)(struct Alloc *a, size_t);
-  void (*free)(struct Alloc *a, void*);
-  void* (*realloc)(struct Alloc *a, void*, size_t);
-  void *user;
-} Alloc;
+#include "postgres.h"
+#include "utils/palloc.h"
 
-#define ALLOC(a, size) (a)->alloc((a), (size))
-#define FREE(a, ptr) (a)->free((a), (ptr))
-#define NEW(a, type) (type*)(ALLOC((a), sizeof(type)))
-#define NEW_ARR(a, type, count) (type*)(ALLOC((a), sizeof(type)*(count)))
-#define REALLOC(a, ptr, new_size) (a)->realloc((a), (ptr), (new_size))
+#define ALLOC(size) palloc((size))
+#define FREE(ptr) pfree((ptr))
+#define NEW(type) (type*)(palloc_object(type))
+#define NEW_ARR(type, count) (type*)(palloc(sizeof(type)*(count)))
+#define REALLOC(ptr, new_size) repalloc((ptr), (new_size))
+#define ARR_RESIZE(arr, new_count)                                             \
+  repalloc_array((arr), typeof((arr)[0]), (new_count))
+
 
 
 #endif // alloc_h

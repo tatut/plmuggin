@@ -13,7 +13,6 @@ typedef struct str {
 } str;
 
 typedef struct strbuf {
-  Alloc *alloc;
   size_t capacity;
   str str;
 } strbuf;
@@ -31,6 +30,8 @@ typedef struct strbuf {
 
 #define str_constant(x) ((str){.len = sizeof(x)-1, .data = x})
 
+#define cstr(c) ((str){.len=strlen((c)),.data=(c)})
+
 bool str_splitat(str in, const char *chars, str *split, str *rest);
 int str_indexof(str in, char ch);
 bool str_each_line(str *lines, str *line);
@@ -43,21 +44,22 @@ bool str_startswith(str haystack, str needle);
 str str_drop(str haystack, size_t len);
 str str_take(str big, size_t len);
 str str_from_cstr(const char *in);
-str str_dup(Alloc *a, str in);
+str str_dup(str in);
 void str_reverse(str mut);
-void str_free(Alloc *a, str *s);
+void str_free(str *s);
 bool str_eq(str a, str b);
 bool str_eq_cstr(str str, const char *cstring);
 char str_char_at(str str, size_t idx);
 char *str_to_cstr(str str);
-str str_from_file(Alloc *a, const char *filename);
+str str_from_file(const char *filename);
 uint64_t str_hash(str in);
 
-strbuf *strbuf_new(Alloc *a);
+strbuf *strbuf_new(void);
 bool strbuf_ensure(strbuf *buf, size_t space_needed);
 bool strbuf_append_str(strbuf *buf, str data);
 bool strbuf_append_int(strbuf *buf, int i);
 bool strbuf_append_char(strbuf *buf, char ch);
+bool strbuf_append_str_escaped(strbuf *buf, str data);
 
 #endif
 
@@ -67,7 +69,7 @@ bool strbuf_append_char(strbuf *buf, char ch);
 #include <string.h>
 #include "alloc.h"
 
-str str_from_file(Alloc *a, const char *filename) {
+str str_from_file(const char *filename) {
   FILE *f;
   size_t size;
   str out;
@@ -81,7 +83,7 @@ str str_from_file(Alloc *a, const char *filename) {
   size = ftell(f);
   rewind(f);
 
-  out = (str) {.len = size, .data = ALLOC(a, size)};
+  out = (str) {.len = size, .data = ALLOC(size)};
   if(!out.data) {
     fprintf(stderr, "Alloc failed\n");
     goto fail;
@@ -89,7 +91,7 @@ str str_from_file(Alloc *a, const char *filename) {
 
   if(size != fread(out.data, 1, size, f)) {
     fprintf(stderr, "Read failed\n");
-    FREE(a, out.data);
+    FREE(out.data);
     goto fail;
   }
   return out;
@@ -190,15 +192,15 @@ str str_from_cstr(const char *in) {
   char *data;
 
   len = strlen(in);
-  data = malloc(len);
-  if(!data) fprintf(stderr, "Malloc failed!");
+  data = ALLOC(len);
+  if(!data) LOG_ERROR("Alloc string of len %zu failed!", len);
   memcpy(data, in, len);
   return (str){.data = data, .len = len};
 }
 
-str str_dup(Alloc *a, str in) {
+str str_dup(str in) {
   char *data;
-  data = ALLOC(a, in.len);
+  data = ALLOC(in.len);
   if(!data) fprintf(stderr, "Aalloc failed!");
   memcpy(data, in.data, in.len);
   return (str) {.len = in.len, .data = data};
@@ -217,8 +219,8 @@ void str_reverse(str mut) {
   }
 }
 
-void str_free(Alloc *a, str *s) {
-  if(s->data) FREE(a, s->data);
+void str_free(str *s) {
+  if(s->data) FREE(s->data);
   s->len = 0;
   s->data = NULL;
 }
@@ -240,7 +242,7 @@ char str_char_at(str str, size_t idx) {
   return str.data[idx];
 }
 
-char *str_to_cstr(str str) { // FIXME: pass in allocator
+char *str_to_cstr(str str) {
   char *cstr;
   cstr = malloc(str.len+1);
   if(!cstr) {
@@ -261,20 +263,19 @@ uint64_t str_hash(str in) {
   return hash;
 }
 
-strbuf *strbuf_new(Alloc *a) {
+strbuf *strbuf_new() {
   strbuf *sb;
   char *initial;
 
-  sb = NEW(a, strbuf);
+  sb = NEW(strbuf);
   if(!sb) return NULL;
-  initial = ALLOC(a, 64);
+  initial = ALLOC(64);
   if(!initial) {
-    FREE(a, sb);
+    FREE(sb);
     return NULL;
   }
   sb->str = (str){.len = 0, .data = initial};
   sb->capacity = 64;
-  sb->alloc = a;
   return sb;
 }
 
@@ -290,7 +291,7 @@ bool strbuf_ensure(strbuf *buf, size_t space_needed) {
     }
     //LOG_NOTICE("%ld - %ld < %ld, realloc to %zu", buf->capacity, buf->str.len, space_needed, new_capacity);
 
-    new_data = REALLOC(buf->alloc, buf->str.data, new_capacity);
+    new_data = REALLOC(buf->str.data, new_capacity);
     if(!new_data) {
       LOG_ERROR("Failed to realloc string buffer from size %zu to %zu", buf->capacity, new_capacity);
       return false;
@@ -306,6 +307,29 @@ bool strbuf_append_str(strbuf *buf, str data) {
   if(!strbuf_ensure(buf, len)) return false;
   memcpy(&buf->str.data[buf->str.len], data.data, len);
   buf->str.len += len;
+  return true;
+}
+
+// append HTML escaped
+bool strbuf_append_str_escaped(strbuf *buf, str data) {
+  size_t *len;
+  strbuf_ensure(buf, data.len); // might need more, but good estimate
+  len = &buf->str.len;
+  for(size_t i = 0; i < data.len; i++) {
+    // check we have enough space for the longest replacement
+    if(buf->capacity - buf->str.len < 6) {
+      if(!strbuf_ensure(buf, 16)) return false;
+    }
+
+    switch(data.data[i]) {
+    case '&': memcpy(&buf->str.data[*len], "&amp;", 5);  *len += 5; break;
+    case '<': memcpy(&buf->str.data[*len], "&lt;", 4);   *len += 4; break;
+    case '>': memcpy(&buf->str.data[*len], "&gt;", 4);   *len += 4; break;
+    case '"': memcpy(&buf->str.data[*len], "&quot;", 6); *len += 6; break;
+    case '\'':memcpy(&buf->str.data[*len], "&#39;", 5);  *len += 5; break;
+    default: buf->str.data[*len] = data.data[i]; *len += 1;
+    }
+  }
   return true;
 }
 
