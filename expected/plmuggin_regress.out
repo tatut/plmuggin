@@ -16,15 +16,13 @@ INSERT INTO todos (label,complete) VALUES
   ('regression test', true),
   ('not done', false),
   ('done', true);
-
 CREATE OR REPLACE FUNCTION render_todos() RETURNS TEXT AS
 $$div.todos
   ul(m:q="SELECT id,label,complete FROM todos")
     li(data-id="{{id}}" class="todo todo-state-{{complete}}") {{label}}
 $$ LANGUAGE plmuggin;
-
 select render_todos();
-            render_todos                                                                                                
+                                                                                                render_todos                                                                                                
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  <!DOCTYPE html>                                                                                                                                                                                           +
  <div class="todos"><ul><li data-id="1" class="todo todo-state-t">regression test</li><li data-id="2" class="todo todo-state-f">not done</li><li data-id="3" class="todo todo-state-t">done</li></ul></div>

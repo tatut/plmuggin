@@ -674,7 +674,7 @@ static int query(_rctx *ctx, m_Contents *contents) {
     }
   }
   strbuf_append_char(sb, 0); // NUL terminate
-  LOG_NOTICE("Running query: %s", sb->str.data);
+  LOG_DEBUG("Running query: %s", sb->str.data);
   // max 65536 rows
   result = SPI_execute_with_args(sb->str.data, nargs, argtypes, values, NULL, true, 1<<16);
   FREE(sb->str.data);
