@@ -74,7 +74,7 @@ m_Template *muggin_parse(str input);
 void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb);
 void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb);
 static int query(_rctx *ctx, m_Contents *contents);
-
+static str muggin_skip_metadata(str input);
 
 
 
@@ -576,9 +576,31 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
   return false;
 }
 
+/* Skip metadata section, separated by "---" plus whitespace */
+str muggin_skip_metadata(str input) {
+  str orig;
+  int index;
+
+  orig = input;
+  index = str_indexof(input, '-');
+  while (index != -1) {
+    input = str_drop(input, index);
+    if (str_char_at(input, 0) == '-' && str_char_at(input, 1) == '-' &&
+        str_char_at(input, 2) == '-') {
+      return str_ltrim(str_drop(input, 3));
+    }
+  }
+  return orig;
+}
+
+
 m_Template *muggin_parse(str input) {
   m_Template *t;
   _ctx ctx;
+
+  LOG_NOTICE("orig template: %.*s", STR_ARG(input));
+  input = str_ltrim(muggin_skip_metadata(input));
+  LOG_NOTICE("after metadata skip: %.*s", STR_ARG(input));
 
   t = NEW(m_Template);
   t->constant_idx = NEW_ARR(size_t, 64);
@@ -882,17 +904,11 @@ bool muggin_render(m_Template *t, m_Scope *scope, strbuf *to) {
   ctx = (_rctx){.t = t, .scope = scope};
   ctx.mq_idx = string_pool_lookup(t->constants, t->constant_idx, t->constants_count, t->constants_capacity,
                                   cstr("m:q"), &ctx.has_query);
-  if(ctx.has_query) {
-    if(SPI_connect() != SPI_OK_CONNECT) {
-      LOG_ERROR("SPI connect failed");
-    }
-  }
+
   strbuf_append_str(to, str_constant("<!DOCTYPE html>\n"));
   muggin_render_node(&ctx, t->root, to);
   strbuf_append_char(to, 0); // NUL terminate to play nice as C string
-  if(ctx.has_query) {
-    SPI_finish();
-  }
+
   return true;
 }
 

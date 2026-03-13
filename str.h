@@ -101,6 +101,7 @@ str str_from_file(const char *filename) {
 }
 
 bool str_splitat(str in, const char *chars, str *split, str *rest) {
+  if(in.len == 0) return false;
   size_t at;
   int chs;
   if(in.len == 0) return false;
@@ -119,7 +120,9 @@ bool str_splitat(str in, const char *chars, str *split, str *rest) {
     }
     at++;
   }
-  return false;
+  *split = in;
+  *rest = (str){.len = 0};
+  return true;
 }
 
 
@@ -129,6 +132,7 @@ int str_indexof(str in, char ch) {
   }
   return -1;
 }
+
 
 bool str_each_line(str *lines, str *line) {
   if(lines->len == 0) return false;
@@ -244,9 +248,9 @@ char str_char_at(str str, size_t idx) {
 
 char *str_to_cstr(str str) {
   char *cstr;
-  cstr = malloc(str.len+1);
+  cstr = ALLOC(str.len+1);
   if(!cstr) {
-    printf("malloc failed");
+    printf("palloc failed");
     exit(1);
   }
   memcpy(cstr, str.data, str.len); // FIXME: check

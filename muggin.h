@@ -131,7 +131,7 @@ void muggin_scope_unbind(m_Scope *scope, str name);
  * freed after parse.
  *
  */
-m_Template *muggin_parse(str input);
+m_Template *muggin_parse(str input, str (*load_template)(str));
 
 /**
  * Render to the given string buffer.
