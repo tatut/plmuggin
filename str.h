@@ -39,7 +39,7 @@ bool is_space(char ch);
 str str_ltrim(str in);
 str str_rtrim(str in);
 str str_trim(str in);
-long str_to_long(str s);
+bool str_to_long(str s, long *value);
 bool str_startswith(str haystack, str needle);
 str str_drop(str haystack, size_t len);
 str str_take(str big, size_t len);
@@ -168,12 +168,18 @@ str str_trim(str in) {
   return str_ltrim(str_rtrim(in));
 }
 
-long str_to_long(str s) {
-  long l=0;
-  for(size_t i=0; i < s.len && s.data[i] >= '0' && s.data[i] <= '9'; i++) {
-    l = (l*10) + (s.data[i]-48);
+bool str_to_long(str s, long *value) {
+  long l = 0;
+  if(s.len == 0) return false;
+  for (size_t i = 0; i < s.len; i++) {
+    if(s.data[i] >= '0' && s.data[i] <= '9') {
+      l = (l * 10) + (s.data[i] - 48);
+    } else {
+      return false;
+    }
   }
-  return l;
+  *value = l;
+  return true;
 }
 bool str_startswith(str haystack, str needle) {
   if(needle.len > haystack.len) return false;

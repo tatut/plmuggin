@@ -1,2 +1,6 @@
-connection: host=localhost database=todomvc port=5432 user=
+# the PostgreSQL connection string and schema to publish
+connection: host=localhost database=todomvc port=5432 user=mugshot
 schema: web
+
+# HTTP port to listen to
+port: 3000

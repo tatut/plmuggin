@@ -46,9 +46,6 @@ static bool read_buf(PgConn *c, size_t bytes, char **data_out) {
 static bool read_msg(PgConn *c, PgMessage *msg) {
   char hdr[5];
   expect(read_to(c, hdr, 5));
-  for (int i = 0; i < 5; i++) {
-    printf("header(%d): %c %d\n", i, isprint(hdr[i]) ? hdr[i] : ' ',  hdr[i]);
-  }
   msg->type = hdr[0];
   msg->len = ntohl(*((int32_t*)&hdr[1])) - 4;
   char *data;
@@ -118,7 +115,7 @@ static bool pg_send(PgConn *c) {
 }
 
 
-PgConn *pg_connect(char *conn_info) {
+PgConn *pg_connect(str ci) {
   str user = {0}, database = {0}, password = {0};
   struct sockaddr_in to;
   memset(&to, 0, sizeof(to));
@@ -126,7 +123,6 @@ PgConn *pg_connect(char *conn_info) {
   to.sin_family = AF_INET;
   to.sin_port = htons(5432);
 
-  str ci = str_from_cstr(conn_info);
   str field;
   while (str_splitat(ci, " ", &field, &ci)) {
     str key, value;
@@ -148,10 +144,10 @@ PgConn *pg_connect(char *conn_info) {
         err("Unable to resolve host %s, got type %d", host, h->h_addrtype);
         return NULL;
       }
-    } else if(str_eq_constant(key, "port")) {
-      long port = str_to_long(value);
+    } else if (str_eq_constant(key, "port")) {
+      long port;
 
-      if(port == 0) {
+      if(!str_to_long(value, &port)) {
         err("Unable to extract port");
         return NULL;
       }
@@ -274,7 +270,7 @@ static bool put_parse(PgConn *c, const char* sql, int num_params, int *param_oid
 }
 
 /* put Bind message to buffer */
-static bool put_bind(PgConn *c, int num_params, char **param_data) {
+static bool put_bind(PgConn *c, int num_params, str *param_data) {
   put_ch(c, 'B');
   mark_len(c);
   // 'B', i32 len, portal name (none), prepared name (none), i16 (num param formats: 0 (text)),
@@ -287,8 +283,8 @@ static bool put_bind(PgConn *c, int num_params, char **param_data) {
   put_ch(c,0); // prepared stmt name (none)
   put_i16(c,0); // text format for all params (text)
   put_i16(c,num_params);
-  for(int p=0;p<num_params;p++) {
-    put_len_string(c,param_data[p]);
+  for(int p = 0; p < num_params; p++) {
+    put_len_str(c, param_data[p]);
   }
   put_i16(c,1); // format for all results
   put_i16(c,1); // binary
@@ -387,7 +383,7 @@ void pg_clear(PgConn *c) {
 
 /* Issue a query, sends parse and bind messages. */
 PgResult pg_query(PgConn *c, const char* sql, int num_params, int *param_oids,
-               char **param_data) {
+                  str *param_data) {
   if(!put_parse(c, sql, num_params, param_oids)) goto fail;
   if(!put_bind(c, num_params, param_data)) goto fail;
   if(!put_describe_portal(c)) goto fail;
@@ -514,4 +510,31 @@ PgArray pg_value_arr(PgVal val) {
   a.lower_bound = ntohl(values[4]);
   a.data = val.data + 20;
   return a;
+}
+
+static char _oid_name[12];
+const char *pg_oid_name(int oid) {
+  switch (oid) {
+  case OID_TEXT:
+    strcpy(_oid_name, "text");
+    break;
+  case OID_BOOL:
+    strcpy(_oid_name, "bool");
+    break;
+  case OID_INT2:
+    strcpy(_oid_name, "int2");
+    break;
+  case OID_INT4:
+    strcpy(_oid_name, "int4");
+    break;
+  case OID_INT8:
+    strcpy(_oid_name, "int8");
+    break;
+  case OID_OID:
+    strcpy(_oid_name, "oid");
+    break;
+  default:
+    snprintf(_oid_name, 12, "%d", oid);
+  }
+  return _oid_name;
 }

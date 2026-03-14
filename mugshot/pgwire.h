@@ -4,6 +4,16 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "../str.h"
+
+/* Define some common PostgreSQL type OIDs */
+#define OID_BOOL 16
+#define OID_INT8 20
+#define OID_INT2 21
+#define OID_INT4 23
+#define OID_TEXT 25
+#define OID_OID  26
+
 
 typedef struct PgConn {
   int sockfd;
@@ -46,7 +56,7 @@ typedef struct PgArray {
   char *data; // data pointer after the header
 } PgArray;
 
-PgConn *pg_connect(char *conn_info);
+PgConn *pg_connect(str conn_info);
 void pg_close(PgConn *conn);
 
 /* Clear all memory buffers. All results and rows are invalid. */
@@ -59,7 +69,11 @@ void pg_clear(PgConn *conn);
  * the memory buffers) or until pg_clear is called.
  */
 PgResult pg_query(PgConn *c, const char* sql, int num_params, int *param_oids,
-                  char **param_data);
+                  str *param_data);
+
+/* Return OID name for printing purposes.
+ * The returned name is not valid after the next call. */
+const char *pg_oid_name(int oid);
 
 /* Get oid and name of a field.
  * Name pointer may be invalidated when more data is read.
@@ -133,6 +147,16 @@ bool pg_ensure_buf(PgConn *c, size_t size);
     (c)->buf_pos += (str).len;                                                 \
     (c)->buf[(c)->buf_pos++] = 0;                                              \
   }
+
+#define put_len_str(c, str)                                                    \
+  {                                                                            \
+    put_i32(c, (str).len);                                                     \
+    if (!pg_ensure_buf(c, (str).len))                                          \
+      return false;                                                            \
+    memcpy(&(c)->buf[(c)->buf_pos], (str).data, (str).len);                    \
+    (c)->buf_pos += (str).len;                                                 \
+  }
+
 
 
 #define put_len_string(c, string)                                              \

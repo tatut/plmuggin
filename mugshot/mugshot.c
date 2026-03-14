@@ -100,17 +100,38 @@ typedef enum {
   MUGSHOT_METHOD_POST,
   MUGSHOT_METHOD_PUT,
   MUGSHOT_METHOD_DELETE,
-  MUGSHOT_METHOD_CONNECT,
   MUGSHOT_METHOD_OPTIONS,
-  MUGSHOT_METHOD_TRACE,
   MUGSHOT_METHOD_PATCH
+  // OPTIONS, TRACE not supported
 } mugshot_http_method;
 
+const char *mugshot_http_method_string[] = {
+    [MUGSHOT_METHOD_GET] = "GET",
+    [MUGSHOT_METHOD_HEAD] = "HEAD",
+    [MUGSHOT_METHOD_POST] = "POST",
+    [MUGSHOT_METHOD_PUT] = "PUT",
+    [MUGSHOT_METHOD_DELETE] = "DELETE",
+    [MUGSHOT_METHOD_OPTIONS] = "OPTIONS",
+    [MUGSHOT_METHOD_PATCH] = "PATCH"
+};
+
+typedef enum {
+  MUGSHOT_TEXT_HTML,
+  MUGSHOT_APPLICATION_JSON,
+  MUGSHOT_TEXT_PLAIN,
+  MUGSHOT_APPLICATION_OCTET_STREAM
+} mugshot_http_content_type;
+
+const char *mugshot_http_content_type_string[] = {
+    [MUGSHOT_TEXT_HTML] = "text/html",
+    [MUGSHOT_APPLICATION_JSON] = "application/json",
+    [MUGSHOT_TEXT_PLAIN] = "text/plain",
+    [MUGSHOT_APPLICATION_OCTET_STREAM] = "application/octet-stream"};
 
 /* == Trie based endpoint routing == */
 
 typedef struct mugshot_endpoint_arg {
-  str name;  
+  str name;
   long oid; // OID type, eg 25 = TEXT
   bool path;
 } mugshot_endpoint_arg;
@@ -119,11 +140,12 @@ typedef struct mugshot_endpoint {
   mugshot_http_method method;
   str name; // name of the function (might not be the same as path)
   str path; // the defined path after the method, like /foo/:id/bar
+  mugshot_http_content_type content_type; // returned content type
   size_t nargs; // how many arguments there are
   mugshot_endpoint_arg *args;
 } mugshot_endpoint;
 
-  
+
 
 typedef struct mugshot_trie {
   struct mugshot_trie *children;
@@ -294,6 +316,8 @@ typedef struct {
 } mugshot_worker;
 
 typedef struct mugshot_server {
+  str connection; // pg connection string
+  str schema; // name of schema to publish
   mugshot_server_state state;
   uint16_t threads;
   uint16_t backlog;
@@ -592,18 +616,6 @@ void _mugshot_http_read(mugshot_conn *r) {
         r->method = MUGSHOT_METHOD_HEAD;
         if(strncmp(&line[1], "EAD ", 4) != 0) goto fail;
         path = &line[5];
-        break;
-
-      case 'T':
-        r->method = MUGSHOT_METHOD_TRACE;
-        if(strncmp(&line[1], "RACE ", 5) != 0) goto fail;
-        path = &line[6];
-        break;
-
-      case 'C':
-        r->method = MUGSHOT_METHOD_CONNECT;
-        if(strncmp(&line[1], "ONNECT ", 7) != 0) goto fail;
-        path = &line[8];
         break;
 
       case 'D':
@@ -1126,44 +1138,197 @@ void SHA1(const uint8_t *data, size_t len, uint8_t digest[20]) {
 #undef ROL
 
 void load_config(int argc, char **argv, mugshot_server *s) {
+  str conf;
+  if (argc != 2) {
+    err("Expected 1 argument: config file, got: %d", (argc-1));
+    exit(1);
+  }
+  /* read file, we consume the parts and never free this */
+  conf = str_from_file(argv[1]);
+  if (conf.len == 0) {
+    err("Couldn't read configuration file: %s", argv[1]);
+    exit(1);
+  }
+
+  /* Apply defaults */
   s->port = 3000;
   s->threads = 10;
   s->backlog = 10;
+
+  str line;
+  int linenum=0;
+  while (str_each_line(&conf, &line)) {
+    linenum++;
+    line = str_trim(line);
+    if (line.len == 0 || str_char_at(line, 0) == '#')
+      continue;
+    str key, value;
+    if (str_indexof(line, ':') < 1 || !str_splitat(line, ":", &key, &value)) {
+      goto parse_error;
+    }
+    key = str_trim(key);
+    value = str_trim(value);
+    if (str_eq_constant(key, "connection")) {
+      s->connection = value;
+    } else if (str_eq_constant(key, "schema")) {
+      s->schema = value;
+    } else if (str_eq_constant(key, "port")) {
+      long v;
+      if (!str_to_long(value, &v)) {
+        goto parse_error;
+      }
+      if (v <= 0 || v > 1 << 16) {
+        err("Invalid port: %ld", v);
+        exit(1);
+      }
+      s->port = v;
+
+    }
+    continue;
+  parse_error:
+    err("Configuration parse error on line %d\n>> " STR_FMT, linenum, STR_ARG(line));
+      exit(1);
+
+  }
+
 }
 
 const char *query_endpoints =
-    "SELECT array_length(proargtypes,1), proargtypes, proargnames::TEXT, typname as \"content-type\", "
+    "SELECT array_length(proargtypes,1), proargtypes, proargnames, typname as \"content-type\", "
     "       COALESCE(obj_description(t.oid,'pg_proc'), proname) AS route, proname "
     "  FROM pg_proc p "
     "  JOIN pg_type t ON p.prorettype = t.oid "
     " WHERE pronamespace = (SELECT oid FROM pg_namespace WHERE nspname=$1)";
 
+bool mugshot_read_content_type(str ct, mugshot_http_content_type *type) {
+  if (str_eq_constant(ct, "text") || str_eq_constant(ct, "text/html")) {
+    *type = MUGSHOT_TEXT_HTML;
+  } else if (str_eq_constant(ct, "bytea") ||
+             str_eq_constant(ct,"application/octet-stream")) {
+    *type = MUGSHOT_APPLICATION_OCTET_STREAM;
+  } else if (str_eq_constant(ct, "application/json")) {
+    *type = MUGSHOT_APPLICATION_JSON;
+  } else {
+    err("Unsupported content type: " STR_FMT, STR_ARG(ct));
+    return false;
+  }
+  return true;
+}
 
-mugshot_endpoint mugshot_read_endpoint(PgConn *conn, PgResult *result) {
-  mugshot_endpoint e = {0};
+bool mugshot_read_method(str *route, mugshot_http_method *method) {
+  for (int m = MUGSHOT_METHOD_GET; m <= MUGSHOT_METHOD_PATCH; m++) {
+    const char *mstr = mugshot_http_method_string[m];
+    int len = strlen(mstr);
+    if (str_startswith(*route, (str){.len = len, .data = (char*)mstr})) {
+      *method = m;
+      *route = str_drop(*route, len);
+      return true;
+    }
+  }
+  err("Unsupported HTTP method in route: " STR_FMT, STR_ARG(*route));
+  return false;
+}
+
+bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) {
   PgVal v;
 
   v = pg_value(conn, result, 0); // arg len
-  e.nargs = ntohl(*((int32_t*)v.data)); // atoi(v.data);
-  e.args = NEW_ARR(mugshot_endpoint_arg, e.nargs);
-  printf(" got %zu args!\n", e.nargs);
+  e->nargs = ntohl(*((int32_t*)v.data)); // atoi(v.data);
+  e->args = NEW_ARR(mugshot_endpoint_arg, e->nargs);
+  if (!e->args) {
+    err("Out of memory for endpoint arguments");
+    exit(1);
+  }
+  printf(" got %zu args!\n", e->nargs);
 
   v = pg_value(conn, result, 1); // arg types
   PgArray arr = pg_value_arr(v);
   int *value = (int32_t*)arr.data;
-  for (int i = 0; i < e.nargs; i++) {
-    e.args[i].oid = ntohl(value[i*2 + 1]); // skip len for each entry, we know its 4
-    printf(" arg %d has type %ld\n", i, e.args[i].oid);
+  for (int i = 0; i < e->nargs; i++) {
+    e->args[i].oid = ntohl(value[i*2 + 1]); // skip len for each entry, we know its 4
+    printf(" arg %d has type %ld\n", i, e->args[i].oid);
   }
-  
-  
-}  
+
+  /* Parse the route, which contains HTTP method and path.
+   * Path can contain parameters. Parameters that are not in the path are
+   * expected to be passed in as query/form parameters.
+   *
+   * Example:
+   * GET/todos/:id
+   * PATCH/my/:id/status
+   *
+   * Any :param reference ends in the next '/' character or end.
+   */
+  v = pg_value(conn, result, 2); // argnames
+  arr = pg_value_arr(v);
+  for (int i = 0; i < e->nargs; i++) {
+    int32_t len = ntohl(*((int32_t *)arr.data));
+    arr.data += 4;
+    str name = (str){.len = len, .data = arr.data}; // dup
+    e->args[i].name = str_dup(name);
+    printf("arg %i name %d: %.*s\n", i, len, STR_ARG(name));
+    arr.data += len;
+  }
+  v = pg_value(conn, result, 3); // content type
+  printf(" CONTENT TYPE: '%.*s'\n", (int)v.len, v.data);
+  if (!mugshot_read_content_type((str){.len = v.len, .data = v.data},
+                                 &e->content_type)) {
+    return false;
+  }
+
+  v = pg_value(conn, result, 4); // route
+  str route = (str){.len = v.len, .data = v.data};
+  if (!mugshot_read_method(&route, &e->method)) {
+    return false;
+  }
+  e->path = str_dup(route);
+  // go through parameters in path
+  str part;
+  while (str_splitat(route, "/", &part, &route)) {
+    if (str_char_at(part, 0) == ':') {
+      str name = str_drop(part, 1);
+      for (int i = 0; i < e->nargs; i++) {
+        if (str_eq(name, e->args[i].name)) {
+          e->args[i].path = true;
+        }
+      }
+    }
+  }
+
+  v = pg_value(conn, result, 5); // name
+  e->name = str_dup((str){.len = v.len, .data = v.data});
+
+  return true;
+
+}
+
+void mugshot_print_endpoint(mugshot_endpoint *e) {
+  printf("%s " STR_FMT, mugshot_http_method_string[e->method],
+         STR_ARG(e->path));
+  if (!str_eq(e->path, e->name)) {
+    printf(" (function: " STR_FMT ")", STR_ARG(e->name));
+  }
+  printf(" [%s]", mugshot_http_content_type_string[e->content_type]);
+  printf("\n  %zu argument%s ", e->nargs,
+         e->nargs == 0 ? "." :
+         (e->nargs == 1 ? ":" : "s:"));
+  for (int i = 0; i < e->nargs; i++) {
+    if (i)
+      printf(", ");
+    printf(STR_FMT" (%s)", STR_ARG(e->args[i].name), pg_oid_name(e->args[i].oid));
+  }
+  printf("\n");
+}
+
 int main(int argc, char **argv) {
 
-  PgConn *conn = pg_connect("host=localhost port=5432 user=mugshot database=todomvc");
-  int param_oids[] = {25}; // TEXT
-  char *param_data[] = {"web"};
-  
+  mugshot_server server;
+  load_config(argc, argv, &server);
+
+  PgConn *conn = pg_connect(str_constant("host=localhost port=5432 user=mugshot database=todomvc"));
+  int param_oids[] = {OID_TEXT}; // TEXT
+  str param_data[] = {server.schema};
+
   PgResult result = pg_query(conn, query_endpoints, 1, param_oids, param_data);
   if (!result.success) {
     err("Failed to query for endpoints, check database access.");
@@ -1171,11 +1336,13 @@ int main(int argc, char **argv) {
   }
   PgRow row = pg_next_row(conn, &result);
   while (row.has_row) {
+    mugshot_endpoint e;
     printf("-------------\n");
-    mugshot_read_endpoint(conn, &result);    
+    mugshot_read_endpoint(conn, &result, &e);
+    mugshot_print_endpoint(&e);
     for (int i = 0; i < result.fields; i++) {
       PgVal v = pg_value(conn, &result, i);
-      printf("field %d (len %d) => ", (int)v.len, i);
+      printf("field %d (len %d) => ", i, (int)v.len);
 
       if (v.is_null) {
         printf("(NULL)");
@@ -1183,10 +1350,10 @@ int main(int argc, char **argv) {
         printf("%.*s", (int)v.len, v.data);
       }
       printf("\n");
-    }
+      }
     row = pg_next_row(conn, &result);
-  }    
-  
+  }
+
   mugshot_server s;
   load_config(argc, argv, &s);
 
