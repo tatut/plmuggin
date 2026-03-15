@@ -1,3 +1,18 @@
+/* Mugshot: serve PL/Muggin templates via HTTP. */
+const char *mugshot_logo =
+    " ███▄ ▄███▓ █    ██   ▄████   ██████  ██░ ██  ▒█████  ▄▄▄█████▓\n"
+    "▓██▒▀█▀ ██▒ ██  ▓██▒ ██▒ ▀█▒▒██    ▒ ▓██░ ██▒▒██▒  ██▒▓  ██▒ ▓▒\n"
+    "▓██    ▓██░▓██  ▒██░▒██░▄▄▄░░ ▓██▄   ▒██▀▀██░▒██░  ██▒▒ ▓██░ ▒░\n"
+    "▒██    ▒██ ▓▓█  ░██░░▓█  ██▓  ▒   ██▒░▓█ ░██ ▒██   ██░░ ▓██▓ ░ \n"
+    "▒██▒   ░██▒▒▒█████▓ ░▒▓███▀▒▒██████▒▒░▓█▒░██▓░ ████▓▒░  ▒██▒ ░ \n"
+    "░ ▒░   ░  ░░▒▓▒ ▒ ▒  ░▒   ▒ ▒ ▒▓▒ ▒ ░ ▒ ░░▒░▒░ ▒░▒░▒░   ▒ ░░   \n"
+    "░  ░      ░░░▒░ ░ ░   ░   ░ ░ ░▒  ░ ░ ▒ ░▒░ ░  ░ ▒ ▒░     ░    \n"
+    "░      ░    ░░░ ░ ░ ░ ░   ░ ░  ░  ░   ░  ░░ ░░ ░ ░ ▒    ░      \n"
+    "       ░      ░           ░       ░   ░  ░  ░    ░ ░           \n";
+
+
+
+
 /* Definitions */
 #include <errno.h>
 #include <stdint.h>
@@ -25,6 +40,9 @@
 #define STR_IMPLEMENTATION
 #include "../str.h"
 #include "util.h"
+
+#define STB_DS_IMPLEMENTATION
+#include "stb_ds.h"
 
 void log_error(const char *error) { fprintf(stderr, "\e[31m[ERROR]\e[0m %s", error); }
 void log_notice(const char *notice) { fprintf(stdout, "%s", notice); }
@@ -122,11 +140,12 @@ typedef enum {
   MUGSHOT_APPLICATION_OCTET_STREAM
 } mugshot_http_content_type;
 
-const char *mugshot_http_content_type_string[] = {
-    [MUGSHOT_TEXT_HTML] = "text/html",
-    [MUGSHOT_APPLICATION_JSON] = "application/json",
-    [MUGSHOT_TEXT_PLAIN] = "text/plain",
-    [MUGSHOT_APPLICATION_OCTET_STREAM] = "application/octet-stream"};
+str mugshot_http_content_type_str[] = {
+  [MUGSHOT_TEXT_HTML] = str_constant("text/html"),
+  [MUGSHOT_APPLICATION_JSON] = str_constant("application/json"),
+  [MUGSHOT_TEXT_PLAIN] = str_constant("text/plain"),
+  [MUGSHOT_APPLICATION_OCTET_STREAM] = str_constant("application/octet-stream")};
+
 
 /* == Trie based endpoint routing == */
 
@@ -139,6 +158,7 @@ typedef struct mugshot_endpoint_arg {
 typedef struct mugshot_endpoint {
   mugshot_http_method method;
   str name; // name of the function (might not be the same as path)
+  str schema; // the schema where the function exists
   str path; // the defined path after the method, like /foo/:id/bar
   mugshot_http_content_type content_type; // returned content type
   size_t nargs; // how many arguments there are
@@ -299,13 +319,6 @@ typedef struct mugshot_conn {
 } mugshot_conn;
 
 
-typedef struct mugshot_route_def {
-  char *path;
-  mugshot_http_method method;
-  bool (*handler)(mugshot_conn*);
-  struct mugshot_route_def *next;
-} mugshot_route_def;
-
 struct mugshot_server;
 
 typedef struct {
@@ -326,8 +339,8 @@ typedef struct mugshot_server {
 
   mugshot_arena arena;
 
-  // linked list of routes (PENDING: use a trie instead)
-  mugshot_route_def *routes;
+  // dynamic array of routes (PENDING: use a trie instead)
+  mugshot_endpoint *routes;
 
   // threads count of workers
   mugshot_worker *workers;
@@ -350,11 +363,14 @@ typedef struct mugshot_server {
 
 } mugshot_server;
 
-void mugshot_server_add_route(mugshot_server *s, mugshot_route_def *route);
+void mugshot_print_endpoint(mugshot_endpoint *e);
+void mugshot_add_endpoint(mugshot_server *s, mugshot_endpoint route);
 
 bool mugshot_server_start(mugshot_server *s);
 void mugshot_server_accept_loop(mugshot_server *s);
 void mugshot_server_wait(mugshot_server *s);
+
+bool mugshot_path_match(mugshot_endpoint *route, const char *path);
 
 /* Start server and enter accept loop. */
 void mugshot_serve(mugshot_server *s);
@@ -520,17 +536,8 @@ char *mugshot_arena_str(mugshot_arena *arena, char *str) {
 #define MUGSHOT_MAX_HEADERS 64
 #endif
 
-void mugshot_server_add_route(mugshot_server *s, mugshot_route_def *route) {
-  mugshot_route_def *r = mugshot_new(&s->arena, mugshot_route_def, 1);
-  r->path = mugshot_arena_str(&s->arena, route->path);
-  r->method = route->method;
-  r->handler = route->handler;
-  if(s->routes == NULL) {
-    s->routes = r;
-  } else {
-    s->routes->next = r;
-    r->next = NULL;
-  }
+void mugshot_add_endpoint(mugshot_server *s, mugshot_endpoint route) {
+  arrput(s->routes, route);
 }
 
 int _mugshot_http_getch(mugshot_conn *r) {
@@ -574,12 +581,45 @@ bool _mugshot_http_read_line(mugshot_conn *r, char **to) {
   return false;
 }
 
+#define out_constant(r, c) write((r)->_socket, (c), sizeof((c))-1)
+#define out_str(r, s) write((r)->_socket, (s).data, (s).len)
+
 void _mugshot_http_fail(mugshot_conn *r, int status, const char *msg) {
   r->state = MUGSHOT_CS_ERR;
   char response[1024];
   size_t len = snprintf(response, 1024, "HTTP/1.1 %d %s\r\nConnection: close\r\n\r\n", status, msg);
   write(r->_socket, response, len);
 }
+
+
+/* Output the OK status line */
+void mugshot_http_ok(mugshot_conn *r) {
+  out_constant(r, "HTTP/1.1 200 OK\r\n");
+}
+
+/* Output an HTTP header line */
+void mugshot_http_header(mugshot_conn *r, str header, str value) {
+  out_str(r,header);
+  out_constant(r,": ");
+  out_str(r,value);
+  out_constant(r,"\r\n");
+}
+
+void mugshot_http_header_sz(mugshot_conn *r, str header, size_t value) {
+  out_str(r,header);
+  out_constant(r, ": ");
+  char sz[32];
+  size_t len = snprintf(sz, 32, "%zu", value);
+  write(r->_socket, sz, len);
+  out_constant(r,"\r\n");
+}
+
+/* Output body, ends headers */
+void mugshot_http_body(mugshot_conn *r, str body) {
+  out_constant(r, "\r\n");
+  write(r->_socket, body.data, body.len);
+}
+
 
 void _mugshot_http_read(mugshot_conn *r) {
   char *line;
@@ -728,10 +768,106 @@ void mugshot_response_file(mugshot_conn *r) {
   fclose(f);
 }
 
+bool mugshot_path_match(mugshot_endpoint *r, const char *path) {
+  const char *at = path;
+  str route_path = r->path;
+loop:
+  printf("matc path: '%c' vs '%c'\n",  *at, str_char_at(route_path, 0));
+    if(*at == 0 && route_path.len == 0) return true; // both exhausted, match!
+    if (*at == 0 && route_path.len)
+      return false; // route path is longer than given
+    char ch = str_char_at(route_path, 0);
+    if (*at == ch) {
+      at++;
+      route_path = str_drop(route_path, 1);
+    } else if (ch == ':') {
+      // consume parameter in route path
+      route_path = str_drop(route_path, 1); // drop ':'
+      while (route_path.len && str_char_at(route_path, 0) != '/')
+        route_path = str_drop(route_path, 1);
+      // consume parameter in given
+      while(*at && *at != '/') at++;
+    }
+    goto loop; // feels more honest than while(1) ¯\_(ツ)_/¯
+}
+
+/* Serve a single HTTP client connection.
+ * Binds parameters from HTTP request and calls the PostgreSQL function.
+ *
+ * Expects 1 single row response, which is the payload (HTML or JSON etc).
+ * The response is copied into the HTTP output buffer as is.
+ *
+ * PENDING: if PG connection failed, should we retry?
+ * PENDING: support Connection: Keep-Alive
+ */
+void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
+                      PgConn *conn) {
+  size_t cap = 512;
+  char sql[512]; // pg identifier max is 63 chars, this is enough
+  size_t len = snprintf(sql, cap, "SELECT \"" STR_FMT "\".\"" STR_FMT "\"",
+                        STR_ARG(endpoint->schema), STR_ARG(endpoint->name));
+  for (int a = 0; a < endpoint->nargs; a++) {
+    len += snprintf(&sql[len], cap - len, "%c$%d", a ? ',' : '(', a+1);
+  }
+  len += snprintf(&sql[len], cap - len, ");");
+  printf("SQL(%zu): '%s'\n", len, sql);
+
+  // PostgreSQL max function parameter number is 100
+  // https://www.postgresql.org/docs/current/limits.html
+  int argtypes[endpoint->nargs];
+  str argvals[endpoint->nargs];
+
+  // Bind parameters, from HTTP path and form/query parameters
+  argtypes[0] = OID_TEXT;
+  argvals[0] = str_constant("maailma!");
+  PgResult res = pg_query(conn, sql, endpoint->nargs, argtypes, argvals);
+
+  if (!res.success) {
+    mugshot_error("PostgreSQL function call query failed, see database logs.");
+    goto fail;
+  } else {
+    PgRow row = pg_next_row(conn, &res);
+    if (!row.has_row) {
+      _mugshot_http_fail(client, 204, "No Content");
+    } else {
+      PgVal v = pg_value(conn, &res, 0);
+      mugshot_http_ok(client);
+      mugshot_http_header(
+          client, str_constant("Content-Type"),
+          mugshot_http_content_type_str[endpoint->content_type]);
+      mugshot_http_header_sz(client, str_constant("Content-Length"),
+                             v.len);
+      mugshot_http_body(client, (str){.len=v.len, .data=v.data});
+
+    }
+    row = pg_next_row(conn, &res);
+    if (!row.success || row.has_row) {
+      mugshot_error("Unexpected extra row in PostgreSQL function call.");
+      goto fail;
+    }
+  }
+
+ fail:
+  _mugshot_http_fail(client, 501, "Internal server error ¯\\_(ツ)_/¯");
+}
+
 void _mugshot_server_worker(mugshot_worker *w) {
   mugshot_server *s = w->server;
-  while (1) {
+  PgConn *conn = NULL;
+  int sleep_seconds = 5;
+  while (!conn) {
+    conn = pg_connect(s->connection);
+    printf("buf pos/size after connect: %zu/%zu (%p)\n", conn->buf_pos, conn->buf_size, conn->buf);
+    if (!conn) {
+      mugshot_error("Worker(%d) failed to get PostgreSQL connection, trying again "
+                    "in %d seconds.", w->id, sleep_seconds);
+      sleep(5);
+      sleep_seconds = sleep_seconds * 2;
+      if(sleep_seconds > 60) sleep_seconds = 60;
+    }
+  }
 
+  while (1) {
     pthread_mutex_lock(&s->acquire_client);
     while(s->waiting_client_count == 0) {
       pthread_cond_wait(&s->has_waiting_clients, &s->acquire_client);
@@ -764,13 +900,16 @@ void _mugshot_server_worker(mugshot_worker *w) {
 
       // Go through handlers to see
       // PENDING: make this a Trie for fast routing
-      mugshot_route_def *route = s->routes;
+      size_t nroutes = arrlen(s->routes);
       bool handled = false;
-      while(!handled && route) {
-        if(strcmp(route->path, c->path) == 0) {
-          handled = route->handler(c);
+      for (size_t i = 0; !handled && i < nroutes; i++) {
+        mugshot_endpoint route = s->routes[i];
+        if (mugshot_path_match(&route, c->path)) {
+          printf("path matched! \n");
+          mugshot_serve_pg(&route, c, conn);
+          //mugshot_print_endpoint(&route);
+          handled = true;
         }
-        route = route->next;
       }
       if(!handled)
         _mugshot_http_fail(c, 404, "Not Found");
@@ -875,7 +1014,7 @@ void mugshot_server_accept_loop(mugshot_server *s) {
   s->free_client = NULL;
   size_t i = s->connections_capacity - 1;
   for(size_t i=0; i < s->connections_capacity; i++) {
-    mugshot_debug("free client %zu", i);
+    //mugshot_debug("free client %zu", i);
     s->connections[i]._next = s->free_client;
     s->free_client = &s->connections[i];
   }
@@ -1152,7 +1291,7 @@ void load_config(int argc, char **argv, mugshot_server *s) {
 
   /* Apply defaults */
   s->port = 3000;
-  s->threads = 10;
+  s->threads = 1;
   s->backlog = 10;
 
   str line;
@@ -1239,14 +1378,12 @@ bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) 
     err("Out of memory for endpoint arguments");
     exit(1);
   }
-  printf(" got %zu args!\n", e->nargs);
 
   v = pg_value(conn, result, 1); // arg types
   PgArray arr = pg_value_arr(v);
   int *value = (int32_t*)arr.data;
   for (int i = 0; i < e->nargs; i++) {
     e->args[i].oid = ntohl(value[i*2 + 1]); // skip len for each entry, we know its 4
-    printf(" arg %d has type %ld\n", i, e->args[i].oid);
   }
 
   /* Parse the route, which contains HTTP method and path.
@@ -1266,11 +1403,11 @@ bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) 
     arr.data += 4;
     str name = (str){.len = len, .data = arr.data}; // dup
     e->args[i].name = str_dup(name);
-    printf("arg %i name %d: %.*s\n", i, len, STR_ARG(name));
+    //printf("arg %i name %d: %.*s\n", i, len, STR_ARG(name));
     arr.data += len;
   }
   v = pg_value(conn, result, 3); // content type
-  printf(" CONTENT TYPE: '%.*s'\n", (int)v.len, v.data);
+  //printf(" CONTENT TYPE: '%.*s'\n", (int)v.len, v.data);
   if (!mugshot_read_content_type((str){.len = v.len, .data = v.data},
                                  &e->content_type)) {
     return false;
@@ -1303,29 +1440,31 @@ bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) 
 }
 
 void mugshot_print_endpoint(mugshot_endpoint *e) {
-  printf("%s " STR_FMT, mugshot_http_method_string[e->method],
+  printf("\e[0;34m%7s\e[0m \e[0;95m" STR_FMT "\e[0m", mugshot_http_method_string[e->method],
          STR_ARG(e->path));
   if (!str_eq(e->path, e->name)) {
     printf(" (function: " STR_FMT ")", STR_ARG(e->name));
   }
-  printf(" [%s]", mugshot_http_content_type_string[e->content_type]);
+  printf(" ["STR_FMT"]", STR_ARG(mugshot_http_content_type_str[e->content_type]));
   printf("\n  %zu argument%s ", e->nargs,
          e->nargs == 0 ? "." :
          (e->nargs == 1 ? ":" : "s:"));
   for (int i = 0; i < e->nargs; i++) {
     if (i)
       printf(", ");
-    printf(STR_FMT" (%s)", STR_ARG(e->args[i].name), pg_oid_name(e->args[i].oid));
+    printf("\e[0;32m"STR_FMT"\e[0m (%s)", STR_ARG(e->args[i].name), pg_oid_name(e->args[i].oid));
   }
   printf("\n");
 }
 
 int main(int argc, char **argv) {
 
-  mugshot_server server;
+  printf("\n\e[1;91m%s\e[0m\nMugshot starting up.\n", mugshot_logo);
+
+  mugshot_server server = {0};
   load_config(argc, argv, &server);
 
-  PgConn *conn = pg_connect(str_constant("host=localhost port=5432 user=mugshot database=todomvc"));
+  PgConn *conn = pg_connect(server.connection);
   int param_oids[] = {OID_TEXT}; // TEXT
   str param_data[] = {server.schema};
 
@@ -1336,26 +1475,16 @@ int main(int argc, char **argv) {
   }
   PgRow row = pg_next_row(conn, &result);
   while (row.has_row) {
-    mugshot_endpoint e;
+    mugshot_endpoint e = {.schema = server.schema};
     printf("-------------\n");
     mugshot_read_endpoint(conn, &result, &e);
     mugshot_print_endpoint(&e);
-    for (int i = 0; i < result.fields; i++) {
-      PgVal v = pg_value(conn, &result, i);
-      printf("field %d (len %d) => ", i, (int)v.len);
 
-      if (v.is_null) {
-        printf("(NULL)");
-      } else {
-        printf("%.*s", (int)v.len, v.data);
-      }
-      printf("\n");
-      }
+    mugshot_add_endpoint(&server, e);
     row = pg_next_row(conn, &result);
   }
 
-  mugshot_server s;
-  load_config(argc, argv, &s);
+  mugshot_serve(&server);
 
   return 0;
 

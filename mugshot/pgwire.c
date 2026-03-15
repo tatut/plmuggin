@@ -76,7 +76,7 @@ bool read_startup_messages(PgConn *c) {
       break;
       // S=parameter status, Z=ready for query
     case 'S':
-      dbg("%s = %s", &c->buf[m.data], &c->buf[m.data]+(strlen(&c->buf[m.data])+1));
+      //dbg("%s = %s", &c->buf[m.data], &c->buf[m.data]+(strlen(&c->buf[m.data])+1));
       break;
     default: break;
     }
@@ -231,6 +231,7 @@ void pg_close(PgConn *c) {
 }
 
 bool pg_ensure_buf(PgConn *c, size_t extra) {
+  //printf("pg_ensure_buf(%p), pos: %zu, size: %zu, extra: %zu\n", c->buf, c->buf_pos, c->buf_size, extra);
   size_t wanted = c->buf_pos + extra;
   size_t size = c->buf_size;
   if(wanted > size) {
@@ -382,13 +383,13 @@ void pg_clear(PgConn *c) {
 }
 
 /* Issue a query, sends parse and bind messages. */
-PgResult pg_query(PgConn *c, const char* sql, int num_params, int *param_oids,
+PgResult pg_query(PgConn *c, const char *sql, int num_params, int *param_oids,
                   str *param_data) {
-  if(!put_parse(c, sql, num_params, param_oids)) goto fail;
-  if(!put_bind(c, num_params, param_data)) goto fail;
-  if(!put_describe_portal(c)) goto fail;
-  if(!put_execute(c)) goto fail;
-  if(!put_sync(c)) goto fail;
+  if (!put_parse(c, sql, num_params, param_oids)) goto fail;
+  if (!put_bind(c, num_params, param_data)) goto fail;
+  if (!put_describe_portal(c)) goto fail;
+  if (!put_execute(c)) goto fail;
+  if (!put_sync(c)) goto fail;
   if(!pg_send(c)) goto fail;
 
   c->buf_pos = 0;
@@ -454,18 +455,37 @@ PgRow pg_next_row(PgConn *c, PgResult *res) {
     c->buf_pos = res->row_start;
   }
   PgMessage m;
-  if(!read_msg(c, &m)) goto fail;
-  if(m.type == 'D') {
-    // got DataRow
-    res->row_start = m.data;
-    return (PgRow) { true, true };
-  } else if(m.type == 'C') {
-    // CommandComplete
-    if(!expect_ready(c)) goto fail;
-    return (PgRow) { true, false };
-  } else {
-    err("Unexpected message from server: %c", m.type);
-    goto fail;
+ message:
+   if (!read_msg(c, &m))
+     goto fail;
+   switch (m.type) {
+   case 'D': { // DataRow
+     res->row_start = m.data;
+     return (PgRow){true, true};
+   }
+   case 'C': { // CommandComplete
+     if(!expect_ready(c)) goto fail;
+     return (PgRow){true, false};
+   }
+   case 'N': { // Notice (PENDING: should we have some "notice handler" callback
+               // option?)
+     size_t len = m.len;
+     char *notice = &c->buf[m.read];
+     while (len > 1) {
+       char field = *notice;
+       len--;
+       notice++;
+       if(field == 'M') // only show message
+         fprintf(stdout, "NOTICE: %s\n", notice);
+       size_t l = strlen(notice) + 1;
+       len -= l;
+       notice += l;
+     }
+     goto message; // read again
+   }
+   default:
+     err("Unexpected message from server: %c", m.type);
+     goto fail;
   }
 
  fail:
