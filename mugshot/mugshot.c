@@ -894,10 +894,9 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
       mugshot_http_header(
           client, str_constant("Content-Type"),
           mugshot_http_content_type_str[endpoint->content_type]);
-      mugshot_http_header_sz(client, str_constant("Content-Length"),
-                             v.len);
+      mugshot_http_header_sz(client, str_constant("Content-Length"), v.len);
+      mugshot_http_header(client, str_constant("Connection"), str_constant("close"));
       mugshot_http_body(client, (str){.len=v.len, .data=v.data});
-
     }
     row = pg_next_row(conn, &res);
     if (!row.success || row.has_row) {
@@ -974,15 +973,13 @@ void _mugshot_server_worker(mugshot_worker *w) {
       }
       if(!handled)
         _mugshot_http_fail(c, 404, "Not Found");
-      if(c->state == MUGSHOT_CS_RES_DONE || c->state == MUGSHOT_CS_ERR) {
-        // PENDING: what about keepalive?
-        close(c->_socket);
-        c->_socket = 0;
-        pthread_mutex_lock(&s->release_client);
-        c->_next = s->free_client;
-        s->free_client = c;
-        pthread_mutex_unlock(&s->release_client);
-      }
+      // PENDING: what about keepalive?
+      close(c->_socket);
+      c->_socket = 0;
+      pthread_mutex_lock(&s->release_client);
+      c->_next = s->free_client;
+      s->free_client = c;
+      pthread_mutex_unlock(&s->release_client);
 
     }
 
