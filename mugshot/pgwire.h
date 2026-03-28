@@ -14,15 +14,33 @@
 #define OID_TEXT 25
 #define OID_OID  26
 
+#define ERR_SIZE 256
+
+typedef enum PgErrorSeverity {
+  ERR_NONE = 0,
+  ERR_ERROR,
+  ERR_FATAL,
+  ERR_PANIC
+} PgErrorSeverity;
+
+typedef struct PgError {
+  char message[ERR_SIZE];
+  PgErrorSeverity severity;
+} PgError;
 
 typedef struct PgConn {
-  int sockfd;
-  int32_t pid;
-  int32_t secret_key;
   char *buf;
   size_t buf_size;
   size_t buf_pos;
 
+  int sockfd;
+  int32_t pid;
+  int32_t secret_key;
+
+  // If we are expecting some message, but get an error instead
+  // keep it here, error_type = 0 when no error
+  PgError error;
+  bool close; // indicate that connection should be closed due to error
 } PgConn;
 
 typedef struct PgMessage {

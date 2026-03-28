@@ -10,6 +10,14 @@ HTTP 200
 [Asserts]
 xpath "string(//div)" contains "42000 + 69 = 42069"
 
+# Check that bad parameters cause bad request response
+GET http://localhost:3000/add?a=123&b=sixseven
+HTTP 400
+
+# Check that missing parameter also causes bad request
+GET http://localhost:3000/add?x=666
+HTTP 400
+
 # Check 404
 GET http://localhost:3000/nosuchendpoint
 HTTP 404

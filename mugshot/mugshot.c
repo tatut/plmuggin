@@ -850,6 +850,7 @@ bool mugshot_path_match(mugshot_endpoint *r, str path) {
  */
 void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
                       PgConn *conn) {
+  bool missing_parameter = false;
   size_t cap = 512;
   char sql[512]; // pg identifier max is 63 chars, this is enough
   size_t len = snprintf(sql, cap, "SELECT \"" STR_FMT "\".\"" STR_FMT "\"",
@@ -869,8 +870,11 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
   for (int i = 0; i < endpoint->nargs; i++) {
     argtypes[i] = endpoint->args[i].oid;
     printf("arg(%d) "STR_FMT" OID: %d\n", i, STR_ARG(endpoint->args[i].name), argtypes[i]);
-    if (!mugshot_request_parameter(client, endpoint->args[i].name, &argvals[i]))
+    if (!mugshot_request_parameter(client, endpoint->args[i].name,
+                                   &argvals[i])) {
+      missing_parameter = true;
       goto fail;
+    }
   }
   // Decode parameters (must be done AFTER we resolved them, because
   // the decoded value may contain '&' characters which would mess the
@@ -907,27 +911,50 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
   pg_clear(conn);
   return;
 fail:
+  if (missing_parameter ||
+      (conn->error.severity != ERR_NONE &&
+       strncmp(conn->error.message, "invalid input syntax", 20) == 0)) {
+    // Problem with parameters, either we didn't find a parameter that was
+    // required, or wWe recognize from PostgreSQL error response, that input
+    // parsing failed.
+    _mugshot_http_fail(client, 400, "Bad request");
+  } else {
+    // Some other error we don't recognize, say it's "internal"
+    _mugshot_http_fail(client, 501, "Internal server error ¯\\_(ツ)_/¯");
+  }
   pg_clear(conn);
-  _mugshot_http_fail(client, 501, "Internal server error ¯\\_(ツ)_/¯");
+
 }
 
-void _mugshot_server_worker(mugshot_worker *w) {
-  mugshot_server *s = w->server;
-  PgConn *conn = NULL;
+static void ensure_connection(int id, str conn_info, PgConn **connection) {
+  PgConn *conn = *connection;
   int sleep_seconds = 5;
+
+  // Close previous connection due to unrecoverable error
+  if (conn && conn->close) {
+    pg_close(conn);
+    conn = NULL;
+  }
   while (!conn) {
-    conn = pg_connect(s->connection);
-    printf("buf pos/size after connect: %zu/%zu (%p)\n", conn->buf_pos, conn->buf_size, conn->buf);
+    conn = pg_connect(conn_info);
+    LOG_DEBUG("buf pos/size after connect: %zu/%zu (%p)\n", conn->buf_pos, conn->buf_size, conn->buf);
     if (!conn) {
       mugshot_error("Worker(%d) failed to get PostgreSQL connection, trying again "
-                    "in %d seconds.", w->id, sleep_seconds);
+                    "in %d seconds.", id, sleep_seconds);
       sleep(5);
       sleep_seconds = sleep_seconds * 2;
       if(sleep_seconds > 60) sleep_seconds = 60;
     }
   }
+  *connection = conn;
+}
+
+void _mugshot_server_worker(mugshot_worker *w) {
+  mugshot_server *s = w->server;
+  PgConn *conn = NULL;
 
   while (1) {
+    ensure_connection(w->id, s->connection, &conn);
     pthread_mutex_lock(&s->acquire_client);
     while(s->waiting_client_count == 0) {
       pthread_cond_wait(&s->has_waiting_clients, &s->acquire_client);

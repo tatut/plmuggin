@@ -183,6 +183,8 @@ PgConn *pg_connect(str ci) {
   }
 
   PgConn *c = malloc(sizeof(PgConn));
+  c->close = false;
+  c->error = (PgError){0};
   c->sockfd = sockfd;
   c->buf = malloc(MIN_BUFFER_SIZE);
   if(c->buf == NULL) goto fail;
@@ -226,6 +228,7 @@ PgConn *pg_connect(str ci) {
 
 void pg_close(PgConn *c) {
   close(c->sockfd);
+  c->sockfd = -1;
   free(c->buf);
   free(c);
 }
@@ -334,6 +337,58 @@ static bool handle_notice(PgConn *c, int size) {
   return true;
 }
 
+
+static bool expect_ready(PgConn *c);
+
+/* When error is encountered, read all the error fields.
+ * Should receive Z (ReadyForQuery) after, or we are closing the
+ * connection.
+ */
+static bool read_error(PgConn *c, char *hdr) {
+  int size = ntohl(*((int32_t *)(hdr + 1)));
+  if (size > 4) {
+    if (!pg_ensure_buf(c, size - 4))
+      return false;
+    if(read(c->sockfd, &c->buf[c->buf_pos], size - 4) != size-4) {
+      err("Couldn't read %d bytes of ErrorResponse from socket.", size - 4);
+      return false;
+    }
+    str data = (str){.data = &c->buf[c->buf_pos], .len = size - 4};
+    while (data.len) {
+      // all error fields are 0 terminated
+      int len = strlen(data.data);
+      //fprintf(stderr, "ERR FIELD: %s\n", data.data);
+
+      switch (str_char_at(data, 0)) {
+      case 'V': { // non-localized severity field
+        if (str_startswith(data, str_constant("VERROR")))
+          c->error.severity = ERR_ERROR;
+        else if (str_startswith(data, str_constant("VFATAL")))
+          c->error.severity = ERR_FATAL;
+        else if (str_startswith(data, str_constant("VPANIC")))
+          c->error.severity = ERR_PANIC;
+        else {
+          LOG_NOTICE("Unknown PostgreSQL error severity: %s", data.data);
+        }
+        break;
+      }
+      case 'M': { // Message
+        snprintf(c->error.message, ERR_SIZE, "%s", data.data+1);
+        break;
+      }
+      default:
+        // Ignore fields we don't care about
+        break;
+      }
+      data = str_drop(data, len + 1);
+    }
+  }
+  // mark connection to be closed if we can't ready a ReadyForQuery ('Z')
+  c->close = !expect_ready(c);
+  return true;
+}
+
+
 static bool expect_msg(PgConn *c, char msg, int expected_size) {
   char hdr[5];
  start:
@@ -345,6 +400,10 @@ static bool expect_msg(PgConn *c, char msg, int expected_size) {
   if('N' == hdr[0]) {
     if(!handle_notice(c, size-4)) return false;
     goto start;
+  }
+  if ('E' == hdr[0]) {
+    read_error(c, hdr);
+    return false;
   }
   if(msg != hdr[0]) {
     err("Expected '%c' message from server, got %c.", msg, hdr[0]);
@@ -374,6 +433,8 @@ static bool expect_ready(PgConn *c) {
 
 void pg_clear(PgConn *c) {
   c->buf_pos = 0;
+  c->error.severity = ERR_NONE;
+  c->error.message[0] = 0;
   if(c->buf_size > 10*MIN_BUFFER_SIZE) {
     // if we have an overly large buffer, realloc it to smaller
     c->buf = realloc(c->buf, MIN_BUFFER_SIZE);
