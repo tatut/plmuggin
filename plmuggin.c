@@ -14,6 +14,7 @@
 #include "utils/palloc.h"
 #include "utils/syscache.h"
 #include "utils/hsearch.h"
+#include "executor/spi.h"
 
 #include "muggin.h"
 #include "env.h"
@@ -24,6 +25,8 @@ PG_FUNCTION_INFO_V1(plmuggin_call_handler);
 
 static bool plmuggin_initialized = false;
 static HTAB *plmuggin_templates = NULL; // loaded templates
+
+str load_template(str);
 
 void _PG_init(void) {
   HASHCTL hash_ctl;
@@ -61,18 +64,21 @@ Datum plmuggin_call_handler(PG_FUNCTION_ARGS) {
 str load_template(str name) { // need schema name as well?
   Datum values[1];
   Oid argtypes[1];
+  int result;
+
   const char *sql =
     "SELECT prosrc"
     "  FROM pg_proc"
     " WHERE proname = $0"
     " ORDER BY oid DESC LIMIT 1";
 
-  argtypes[1] = TEXTOID;
-  values = CStringGetDatum(str_to_cstr(name));
-  result = SPI_execute_with_args(sql, 1, argtypes, values, NULL, TRUE, 1);
+  argtypes[0] = TEXTOID;
+  values[0] = CStringGetDatum(str_to_cstr(name));
+  result = SPI_execute_with_args(sql, 1, argtypes, values, NULL, 1, 1);
   if (result < 1 || !SPI_tuptable || SPI_tuptable->numvals < 1) {
     LOG_ERROR("Failed to get source for template: \"" STR_FMT "\"",
               STR_ARG(name));
+    return (str){0};
   } else {
     HeapTuple tuple;
     char *source;
@@ -82,6 +88,7 @@ str load_template(str name) { // need schema name as well?
     return str_from_cstr(source);
   }
 }
+
 
 /* Execute function */
 static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
@@ -124,13 +131,13 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   numargs = get_func_arg_info(fn_pg_proc, &argtypes, &argnames, &argmodes);
 
   /* Load muggin template from source now */
-  template = (str) {.data = source, .len = strlen(source) };
-  if (SPI_connect() != SPI_CONNECT_OK) {
+  template = (str){.data = source, .len = strlen(source)};
+  if (SPI_connect() != SPI_OK_CONNECT) {
     elog(ERROR, "Can't connect SPI.");
   }
 
   // PENDING: cache loaded templates
-  tpl = muggin_parse(template);
+  tpl = muggin_parse(template, load_template);
   if(!tpl) {
     elog(ERROR, "Template loading failed.");
   }
@@ -153,9 +160,14 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
     fmgr_info(type_struct->typoutput, &(arg_out_func[i]));
     ReleaseSysCache(type_tuple);
 
-    value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
+    //value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
     name = (str){.data = argnames[i], .len = strlen(argnames[i])};
-    muggin_scope_bind(scope, name, cstr(value), BF_NEED_ESCAPE);
+
+    fprintf(stderr, "Bind arg %d, OID: %d, name: "STR_FMT", val: %p\n", i, argtype,
+            STR_ARG(name), fcinfo->args[i].value);
+
+    // muggin_scope_bind(scope, name, cstr(value), BF_NEED_ESCAPE);
+    muggin_scope_bind(scope, name, argtype, fcinfo->args[i].value, BF_NEED_ESCAPE);
   }
   prorettype = pl_struct->prorettype;
   ReleaseSysCache(fn_pg_proc);

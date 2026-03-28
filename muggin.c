@@ -70,7 +70,7 @@ static bool muggin_contents_add_str(_ctx *ctx, m_Contents *contents,
                                     m_ContentType type, str content);
 static bool muggin_contents_from_str(_ctx *ctx, str s, m_Contents *contents);
 static bool muggin_parse_node(_ctx *ctx, m_Node **to);
-m_Template *muggin_parse(str input);
+
 void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb);
 void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb);
 static int query(_rctx *ctx, m_Contents *contents);
@@ -240,7 +240,7 @@ static bool valid_attr(char ch, bool first) {
 static bool valid_id(char ch, bool first) { return valid_tag(ch, first); }
 static bool valid_class(char ch, bool first) { return valid_tag(ch, first); }
 
-str void_elements[] = {
+static str void_elements[] = {
     str_constant("area"),  str_constant("base"),  str_constant("br"),
     str_constant("col"),   str_constant("embed"), str_constant("hr"),
     str_constant("img"),   str_constant("input"), str_constant("link"),
@@ -594,7 +594,7 @@ str muggin_skip_metadata(str input) {
 }
 
 
-m_Template *muggin_parse(str input) {
+m_Template *muggin_parse(str input, str (*load_template)(str)) {
   m_Template *t;
   _ctx ctx;
 
@@ -638,11 +638,23 @@ void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb) {
       m_Binding b;
       b = ctx->scope->values[contents->contents[i].id];
       LOG_DEBUG("idx: %zu, b.flags = %d", contents->contents[i].id, b.flags);
-      if(b.flags & BF_HAS_VALUE) {
+      if (b.flags & BF_HAS_VALUE) {
+        // We need to stringify here
+        FmgrInfo out;
+        str value;
+        Oid typoutput;
+        bool typisvarlena;
+
+        fprintf(stderr, "rendering value of type %d\n", b.oid);
+        getTypeOutputInfo(b.oid, &typoutput, &typisvarlena);
+        value.data = OidOutputFunctionCall(typoutput, b.value);
+        value.len = strlen(value.data);
+        fprintf(stderr, "binding value: "STR_FMT"\n", STR_ARG(value));
+
         if(b.flags & BF_NEED_ESCAPE) {
-          strbuf_append_str_escaped(sb, b.value);
+          strbuf_append_str_escaped(sb, value);
         } else {
-          strbuf_append_str(sb, b.value);
+          strbuf_append_str(sb, value);
         }
       } else {
         LOG_NOTICE("Missing value for: "STR_FMT, STR_ARG(NAME(ctx->t, contents->contents[i].id)));
@@ -654,6 +666,10 @@ void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb) {
   }
 }
 
+/* Run a PostgreSQL query via SPI.
+ * Converts {{name}} arguments to PostgreSQL query arguments, to avoid string
+ * interpolation problems.
+ */
 static int query(_rctx *ctx, m_Contents *contents) {
   strbuf *sb;
   int nargs;
@@ -681,10 +697,8 @@ static int query(_rctx *ctx, m_Contents *contents) {
       b = ctx->scope->values[contents->contents[i].id];
       LOG_DEBUG("idx: %zu, b.flags = %d", contents->contents[i].id, b.flags);
       if(b.flags & BF_HAS_VALUE) {
-        char *v;
-        argtypes[nargs] = TEXTOID;
-        v = str_to_cstr(b.value); // FIXME: actually have oid+datum as bindings
-        values[nargs] = CStringGetDatum(v);
+        argtypes[nargs] = b.oid;
+        values[nargs] = b.value;
         strbuf_append_char(sb, '$');
         nargs += 1;
         strbuf_append_int(sb, nargs);
@@ -823,26 +837,17 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
             HeapTuple tuple;
             tuple = SPI_tuptable->vals[row];
 
-            for(int col = 1; col <= tupdesc->natts; col++) {
+            for (int col = 1; col <= tupdesc->natts; col++) {
+              Oid type;
               Datum value;
               bool isnull;
               int idx;
-              str strvalue;
               idx = varidx[col-1];
-              if(idx != -1) {
+              if (idx != -1) {
+                type = SPI_gettypeid(tupdesc, col);
                 value = SPI_getbinval(tuple, tupdesc, col, &isnull);
-                if(isnull) {
-                  strvalue = (str){.len = 0, .data = NULL};
-                } else {
-                  Oid typoutput;
-                  bool typisvarlena;
+                muggin_scope_bind_idx(ctx->scope, idx, type, value, BF_NEED_ESCAPE);
 
-                  getTypeOutputInfo(SPI_gettypeid(tupdesc, col),
-                                    &typoutput, &typisvarlena);
-                  strvalue.data = OidOutputFunctionCall(typoutput, value);
-                  strvalue.len = strlen(strvalue.data);
-                }
-                muggin_scope_bind_idx(ctx->scope, idx, strvalue, BF_NEED_ESCAPE);
               }
             }
             /* Render all children */
@@ -874,20 +879,21 @@ m_Scope *muggin_scope_new(m_Template *tpl) {
   return scope;
 }
 
-void muggin_scope_bind(m_Scope *scope, str name, str value, uint8_t flags) {
+void muggin_scope_bind(m_Scope *scope, str name, Oid type, Datum value, uint8_t flags) {
   bool found;
   size_t idx;
   idx = muggin_lookup_name(scope->template, name, &found);
   if(!found) {
     LOG_NOTICE("Template has no variable named: %.*s", STR_ARG(name));
   } else {
-    muggin_scope_bind_idx(scope, idx, value, flags);
+    muggin_scope_bind_idx(scope, idx, type, value, flags);
   }
 }
 
-void muggin_scope_bind_idx(m_Scope *scope, size_t idx, str value, uint8_t flags) {
+void muggin_scope_bind_idx(m_Scope *scope, size_t idx, Oid type, Datum value, uint8_t flags) {
   LOG_DEBUG("idx %zu bound to "STR_FMT, idx, STR_ARG(value));
-  scope->values[idx] = (m_Binding){
+  scope->values[idx] = (m_Binding) {
+    .oid = type,
     .value = value,
     .flags = flags | BF_HAS_VALUE
   };

@@ -101,7 +101,8 @@ typedef struct m_Template {
 #define BF_HAS_VALUE 1<<1
 
 typedef struct m_Binding {
-  str value; // string representation
+  Oid oid;
+  Datum value;
   uint8_t flags;
 } m_Binding;
 
@@ -119,9 +120,9 @@ m_Scope *muggin_scope_new(m_Template *tpl);
  * Set flag BF_NEED_ESCAPE if HTML entities need to be escaped (like strings).
  * The BF_HAS_VALUE will be automatically set.
  */
-void muggin_scope_bind(m_Scope *scope, str name, str value, uint8_t flags);
+void muggin_scope_bind(m_Scope *scope, str name, Oid type, Datum value, uint8_t flags);
 
-void muggin_scope_bind_idx(m_Scope *scope, size_t idx, str value, uint8_t flags);
+void muggin_scope_bind_idx(m_Scope *scope, size_t idx, Oid type, Datum value, uint8_t flags);
 
 /* Revert to previous binding. */
 void muggin_scope_unbind(m_Scope *scope, str name);
@@ -138,6 +139,5 @@ m_Template *muggin_parse(str input, str (*load_template)(str));
  * Returns true on success.
  */
 bool muggin_render(m_Template *t, m_Scope *scope, strbuf *to);
-
 
 #endif //muggin_h
