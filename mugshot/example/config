@@ -4,3 +4,7 @@ schema: web
 
 # HTTP port to listen to
 port: 3000
+
+# Maximum amount of seconds to allow keep-alive connection to be idle.
+# This is prevent denial of service that consumes connections.
+keep-alive-max-idle: 1

@@ -483,6 +483,15 @@ PgRow pg_next_row(PgConn *c, PgResult *res) {
      }
      goto message; // read again
    }
+   case 'E': { // ErrorResponse
+     // Z sync should come after this, but we could just close the connection
+     // on error
+     size_t len = m.len - 1;
+     char type = c->buf[m.read];
+     str msg = (str){.data = &c->buf[m.read + 1], .len = len - 1};
+     fprintf(stderr, "ERROR(%c): "STR_FMT"\n", type, STR_ARG(msg));
+     goto fail;
+   }
    default:
      err("Unexpected message from server: %c", m.type);
      goto fail;

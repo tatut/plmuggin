@@ -7,24 +7,11 @@ const char *mugshot_logo =
   "██║ ╚═╝ ██║╚██████╔╝╚██████╔╝███████║██║  ██║╚██████╔╝   ██║   \n"
   "╚═╝     ╚═╝ ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝   \n";
 
-/*const int logo_color[] = {
-    31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 0, // M
-    32, 32, 32, 32, 32, 32, 32, 32, 0,         // U
-    33, 33, 33, 33, 33, 33, 33, 33, 0,         // G
-    34, 34, 34, 34, 34, 34, 34, 0,             // S
-    35, 35, 35, 35, 35, 35, 35, 0,             // H
-    36, 36, 36, 36, 36, 36, 36, 36, 0,         // O
-    37, 37, 37, 37, 37, 37, 37, 37, 0          // T
-    };*/
-
 const int logo_color[] = {31, 31, 31, 31, 31, 31, 31, 31, 31, 32, 32, 32, 32,
                           32, 32, 32, 32, 32, 32, 32, 33, 33, 33, 33, 33, 33,
                           33, 33, 33, 33, 33, 34, 34, 34, 34, 34, 34, 34, 34,
                           34, 34, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35,
                           35, 35, 35, 36, 36, 36, 36, 36, 36, 36, 36};
-
-
-
 
 
 /* Definitions */
@@ -313,7 +300,8 @@ typedef struct mugshot_conn {
 
   mugshot_arena arena;
   mugshot_http_method method;
-  const char* path;
+  str path;
+  str query_parameters;
   int headers_size;
   mugshot_header *headers;
 
@@ -384,12 +372,19 @@ bool mugshot_server_start(mugshot_server *s);
 void mugshot_server_accept_loop(mugshot_server *s);
 void mugshot_server_wait(mugshot_server *s);
 
-bool mugshot_path_match(mugshot_endpoint *route, const char *path);
+bool mugshot_path_match(mugshot_endpoint *route, str path);
 
 /* Start server and enter accept loop. */
 void mugshot_serve(mugshot_server *s);
 
 bool mugshot_response_static(mugshot_conn *req, const char *content_type, size_t content_length, const char *content);
+
+/**
+ * Extract parameter in query or form parameters.
+ * The value points directly to the input buffer and doesn't need to be freed.
+ * Must be str_dup'ed if want to use the value after request processing is done.
+ */
+bool mugshot_request_parameter(mugshot_conn *req, str name, str *value);
 
 /* == Base64 == */
 
@@ -687,12 +682,30 @@ void _mugshot_http_read(mugshot_conn *r) {
       default: goto fail;
     }
 
-      // path and version
-      char *space = strchr(path, ' ');
-      mugshot_debug("space found: %s", space);
-      if(!space) goto fail;
-      *space = 0;
-      r->path = path; // we can reuse buffer memory in the same arena
+      // path (query parameters) and version
+      char *space = path;
+      while (*space != 0 && *space != ' ' && *space != '?')
+        space += 1;
+      if(*space == 0) goto fail;
+      else if (*space == '?') {
+        // Have path and query parameters
+        r->path = (str){.data = path, .len = space-path};
+        // find the space where query parameters ends
+        space += 1;
+        char *query_parameters = space;
+        while (*space != 0 && *space != ' ')
+          space += 1;
+        if (*space == 0)
+          goto fail;
+        r->query_parameters =
+            (str){.data = query_parameters, .len = space - query_parameters};
+      } else {
+        // Just a path, no query parameters
+        r->path = (str){.data = path, .len = space - path};
+        r->query_parameters = (str){0};
+      }
+      mugshot_debug("Request line\n PATH: \"" STR_FMT "\"\nQUERY: \"" STR_FMT "\"",
+                    STR_ARG(r->path), STR_ARG(r->query_parameters));
       if(strncmp(space+1, "HTTP/", 5)!=0) goto fail;
       r->state = MUGSHOT_CS_REQ_HEADERS;
       break;
@@ -755,10 +768,28 @@ bool mugshot_response_static(mugshot_conn *req, const char *content_type,
   return true;
 }
 
+bool mugshot_request_parameter(mugshot_conn *req, str name, str *value) {
+  // try query parameters
+  str parameter;
+  str rest = req->query_parameters;
+  while (str_splitat(rest, "&", &parameter, &rest)) {
+    str n, val;
+    if (str_splitat(parameter, "=", &n, &val)) {
+      if(str_eq(n, name)) {
+        *value = val;
+        return true;
+      }
+    }
+  }
+  // PENDING: try form parameters
+
+  return false;
+}
+
 void mugshot_response_file(mugshot_conn *r) {
 
   // FIXME: unsecure!
-  FILE* f = fopen(&r->path[1], "rb");
+  FILE* f = fopen(&r->path.data[1], "rb");
   if(!f) {
     _mugshot_http_fail(r, 404, "Not found");
     return;
@@ -782,17 +813,15 @@ void mugshot_response_file(mugshot_conn *r) {
   fclose(f);
 }
 
-bool mugshot_path_match(mugshot_endpoint *r, const char *path) {
-  const char *at = path;
+bool mugshot_path_match(mugshot_endpoint *r, str path) {
   str route_path = r->path;
-loop:
-  printf("matc path: '%c' vs '%c'\n",  *at, str_char_at(route_path, 0));
-    if(*at == 0 && route_path.len == 0) return true; // both exhausted, match!
-    if (*at == 0 && route_path.len)
+  while(route_path.len && path.len) {
+  printf("matc path: '%c' vs '%c'\n",  str_char_at(path, 0), str_char_at(route_path, 0));
+    if (!path.len && route_path.len)
       return false; // route path is longer than given
     char ch = str_char_at(route_path, 0);
-    if (*at == ch) {
-      at++;
+    if (str_char_at(path, 0) == ch) {
+      path = str_drop(path, 1);
       route_path = str_drop(route_path, 1);
     } else if (ch == ':') {
       // consume parameter in route path
@@ -800,9 +829,14 @@ loop:
       while (route_path.len && str_char_at(route_path, 0) != '/')
         route_path = str_drop(route_path, 1);
       // consume parameter in given
-      while(*at && *at != '/') at++;
+      while (path.len && str_char_at(path, 0) != '/')
+        path = str_drop(path, 1);
+    } else {
+      return false;
     }
-    goto loop; // feels more honest than while(1) ¯\_(ツ)_/¯
+  }
+  // if both are exhausted, we have a match!
+  return (!path.len && !route_path.len);
 }
 
 /* Serve a single HTTP client connection.
@@ -832,8 +866,19 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
   str argvals[endpoint->nargs];
 
   // Bind parameters, from HTTP path and form/query parameters
-  argtypes[0] = OID_TEXT;
-  argvals[0] = str_constant("maailma!");
+  for (int i = 0; i < endpoint->nargs; i++) {
+    argtypes[i] = endpoint->args[i].oid;
+    printf("arg(%d) "STR_FMT" OID: %d\n", i, STR_ARG(endpoint->args[i].name), argtypes[i]);
+    if (!mugshot_request_parameter(client, endpoint->args[i].name, &argvals[i]))
+      goto fail;
+  }
+  // Decode parameters (must be done AFTER we resolved them, because
+  // the decoded value may contain '&' characters which would mess the
+  // splitting)
+  for (int i = 0; i < endpoint->nargs; i++) {
+    str_urldecode(&argvals[i]);
+  }
+
   PgResult res = pg_query(conn, sql, endpoint->nargs, argtypes, argvals);
 
   if (!res.success) {
@@ -860,8 +905,10 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
       goto fail;
     }
   }
-
- fail:
+  pg_clear(conn);
+  return;
+fail:
+  pg_clear(conn);
   _mugshot_http_fail(client, 501, "Internal server error ¯\\_(ツ)_/¯");
 }
 

@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <ctype.h>
 
 #include "alloc.h"
 #include "env.h"
@@ -53,6 +54,8 @@ char str_char_at(str str, size_t idx);
 char *str_to_cstr(str str);
 str str_from_file(const char *filename);
 uint64_t str_hash(str in);
+bool str_urldecode(str *mut);
+bool str_urldecode_to(str in, str *to);
 
 strbuf *strbuf_new(void);
 bool strbuf_ensure(strbuf *buf, size_t space_needed);
@@ -60,6 +63,8 @@ bool strbuf_append_str(strbuf *buf, str data);
 bool strbuf_append_int(strbuf *buf, int i);
 bool strbuf_append_char(strbuf *buf, char ch);
 bool strbuf_append_str_escaped(strbuf *buf, str data);
+
+
 
 #endif
 
@@ -101,9 +106,9 @@ str str_from_file(const char *filename) {
 }
 
 bool str_splitat(str in, const char *chars, str *split, str *rest) {
-  if(in.len == 0) return false;
   size_t at;
   int chs;
+
   if(in.len == 0) return false;
   at = 0;
   chs = strlen(chars);
@@ -273,6 +278,70 @@ uint64_t str_hash(str in) {
   return hash;
 }
 
+/* URL decode to existing string, which must have enough space.
+ * The output string length is adjusted on success to the actual
+ * decoded length.
+ * Returns true on success, false otherwise.
+ */
+bool str_urldecode_to(str in, str *out) {
+  size_t p,o;
+  p = 0; // in position
+  o = 0; // out position
+  while (p < in.len && o < out->len) {
+    char at;
+    at = str_char_at(in, p);
+    if (at == '%') {
+      char d1, d2;
+      int n1, n2;
+
+      if ((in.len - p) < 2)
+        return false; // must have at least 2 digits left
+
+      d1 = str_char_at(in, p + 1);
+      d2 = str_char_at(in, p + 2);
+
+      if (d1 >= '0' && d1 <= '9') {
+        n1 = d1 - '0';
+      } else if (d1 >= 'a' && d1 <= 'f') {
+        n1 = 10 + (d1 - 'a');
+      } else if (d1 >= 'A' && d1 <= 'F') {
+        n1 = 10 + (d1 - 'A');
+      } else {
+        goto fail;
+      }
+
+      if (d2 >= '0' && d2 <= '9') {
+        n2 = d2 - '0';
+      } else if (d2 >= 'a' && d2 <= 'f') {
+        n2 = 10 + (d2 - 'a');
+      } else if (d2 >= 'A' && d2 <= 'F') {
+        n2 = 10 + (d2 - 'A');
+      } else {
+        goto fail;
+      }
+
+      out->data[o++] = (n1 << 4) + n2;
+      p += 3; // skip '%' and 2 hex digits
+    } else if (at < 32) {
+      // disallow ASCII control characters
+      goto fail;
+    } else {
+      out->data[o++] = at;
+      p += 1;
+    }
+  }
+
+  out->len = o;
+  return true;
+fail:
+  return false;
+}
+
+/* Decode in place to same buffer, we can do it
+ * becose decoding always is shorter.
+ */
+bool str_urldecode(str *encoded) { return str_urldecode_to(*encoded, encoded); }
+
 strbuf *strbuf_new() {
   strbuf *sb;
   char *initial;
@@ -347,7 +416,7 @@ bool strbuf_append_int(strbuf *buf, int i) {
   size_t len;
   if(!strbuf_ensure(buf, 12)) return false;
   len = snprintf(&buf->str.data[buf->str.len], 12, "%d", i);
-  buf->str.len += (len-1);
+  buf->str.len += len;
   return true;
 }
 
