@@ -9,7 +9,8 @@ jobs:
       - run: docker run -d -p 5432:5432 -e POSTGRES_USER=test -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=test plmuggintest
       - uses: iFaxity/wait-on-action@v1.2.1
         with:
-          tcp: localhost:5432
+          resource: tcp:localhost:5432
+          tcpTimeout: 30000
       - run: psql -h localhost -p 5432 -U test -f mugshot/test/test.sql
       - run: ./mugshot/test/start.sh
       - run: curl "http://localhost:3000/add?a=42000&b=69"
