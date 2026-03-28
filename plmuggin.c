@@ -147,26 +147,11 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   for(int i=0;i<numargs;i++) {
     // Bind to template names
     Oid argtype;
-    char *value;
-    HeapTuple type_tuple;
     str name;
 
     argtype = pl_struct->proargtypes.values[i];
-    type_tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(argtype));
-    if(!HeapTupleIsValid(type_tuple))
-      elog(ERROR, "cache lookup failed for type %u", argtype);
 
-    type_struct = (Form_pg_type) GETSTRUCT(type_tuple);
-    fmgr_info(type_struct->typoutput, &(arg_out_func[i]));
-    ReleaseSysCache(type_tuple);
-
-    //value = OutputFunctionCall(&arg_out_func[i], fcinfo->args[i].value);
     name = (str){.data = argnames[i], .len = strlen(argnames[i])};
-
-    fprintf(stderr, "Bind arg %d, OID: %d, name: "STR_FMT", val: %p\n", i, argtype,
-            STR_ARG(name), fcinfo->args[i].value);
-
-    // muggin_scope_bind(scope, name, cstr(value), BF_NEED_ESCAPE);
     muggin_scope_bind(scope, name, argtype, fcinfo->args[i].value, BF_NEED_ESCAPE);
   }
   prorettype = pl_struct->prorettype;

@@ -643,11 +643,9 @@ void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb) {
         Oid typoutput;
         bool typisvarlena;
 
-        fprintf(stderr, "rendering value of type %d\n", b.oid);
         getTypeOutputInfo(b.oid, &typoutput, &typisvarlena);
         value.data = OidOutputFunctionCall(typoutput, b.value);
         value.len = strlen(value.data);
-        fprintf(stderr, "binding value: "STR_FMT"\n", STR_ARG(value));
 
         if(b.flags & BF_NEED_ESCAPE) {
           strbuf_append_str_escaped(sb, value);
