@@ -9,3 +9,7 @@ GET http://localhost:3000/add?a=42000&b=69
 HTTP 200
 [Asserts]
 xpath "string(//div)" contains "42000 + 69 = 42069"
+
+# Check 404
+GET http://localhost:3000/nosuchendpoint
+HTTP 404
