@@ -799,11 +799,12 @@ void mugshot_response_file(mugshot_conn *r) {
   struct stat s;
   int fd = fileno(f);
   fstat(fd, &s);
+  uint64_t len = s.st_size;
   const size_t hlen = snprintf(header, 512,
                                "HTTP/1.1 200 OK\r\n"
                                "Content-Length: %llu\r\n"
                                "Connection: close\r\n"
-                               "\r\n", s.st_size);
+                               "\r\n", len);
   write(r->_socket, header, hlen);
   #ifdef __linux__
   sendfile(r->_socket, fd, 0, s.st_size);
