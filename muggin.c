@@ -344,7 +344,6 @@ static bool muggin_read_attribute(_ctx *ctx, m_Attr *attr) {
       PARSE_ERROR(ctx, "Unterminated quoted string");
     }
   } else {
-    str val;
     size_t len=0;
     char ch;
     do {
@@ -640,7 +639,6 @@ void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb) {
       LOG_DEBUG("idx: %zu, b.flags = %d", contents->contents[i].id, b.flags);
       if (b.flags & BF_HAS_VALUE) {
         // We need to stringify here
-        FmgrInfo out;
         str value;
         Oid typoutput;
         bool typisvarlena;
