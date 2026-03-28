@@ -10,7 +10,9 @@ jobs:
       - uses: iFaxity/wait-on-action@v1.2.1
         with:
           resource: tcp:localhost:5432
+          delay: 1000
           tcpTimeout: 30000
+      - run: docker ps
       - run: psql -h localhost -p 5432 -U test -f mugshot/test/test.sql
       - run: ./mugshot/test/start.sh
       - run: curl "http://localhost:3000/add?a=42000&b=69"
