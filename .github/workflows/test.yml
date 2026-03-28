@@ -15,4 +15,5 @@ jobs:
       - run: docker ps
       - run: psql -h localhost -p 5432 -U test -f mugshot/test/test.sql
       - run: ./mugshot/test/start.sh
-      - run: curl "http://localhost:3000/add?a=42000&b=69"
+      - uses: gacts/install-hurl@v1.3.2
+      - run: hurl --test mugshot/test/test.hurl
