@@ -597,9 +597,7 @@ m_Template *muggin_parse(str input, str (*load_template)(str)) {
   m_Template *t;
   _ctx ctx;
 
-  LOG_NOTICE("orig template: %.*s", STR_ARG(input));
   input = str_ltrim(muggin_skip_metadata(input));
-  LOG_NOTICE("after metadata skip: %.*s", STR_ARG(input));
 
   t = NEW(m_Template);
   t->constant_idx = NEW_ARR(size_t, 64);
