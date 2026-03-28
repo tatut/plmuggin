@@ -817,7 +817,6 @@ void mugshot_response_file(mugshot_conn *r) {
 bool mugshot_path_match(mugshot_endpoint *r, str path) {
   str route_path = r->path;
   while(route_path.len && path.len) {
-  printf("matc path: '%c' vs '%c'\n",  str_char_at(path, 0), str_char_at(route_path, 0));
     if (!path.len && route_path.len)
       return false; // route path is longer than given
     char ch = str_char_at(route_path, 0);
