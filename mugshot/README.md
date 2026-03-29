@@ -2,8 +2,8 @@
 
 ![mugshot logo](https://raw.githubusercontent.com/tatut/plmuggin/main/mugshot/logo.png)
 
-Mugshot is an HTTP server that can serve templates over HTTP.
-Templates are routed automatically by their metadata.
+Mugshot is an HTTP server that can serve templates and other PostgreSQL functions over HTTP.
+Templates are routed automatically by their name/comment metadata.
 
 ## Quick start
 
