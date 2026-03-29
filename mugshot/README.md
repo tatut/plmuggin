@@ -1,5 +1,7 @@
 # Mugshot - Serve PL/Muggin templates over HTTP
 
+![mugshot logo](https://raw.githubusercontent.com/tatut/plmuggin/main/mugshot/logo.png)
+
 Mugshot is an HTTP server that can serve templates over HTTP.
 Templates are routed automatically by their metadata.
 
