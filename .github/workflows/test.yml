@@ -12,9 +12,7 @@ jobs:
           resource: tcp:localhost:5432
           delay: 1000
           tcpTimeout: 30000
-      - run: docker ps
       - run: psql -h localhost -p 5432 -U test -f mugshot/test/test.sql
       - run: ./mugshot/test/start.sh
       - uses: gacts/install-hurl@v1.3.2
-      - run: curl -vvv "http://localhost:3000/add?a=123&b=456"
       - run: hurl --test mugshot/test/test.hurl
