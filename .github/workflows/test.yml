@@ -4,12 +4,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: adjust/pg-ext-actions/pg-setup@master
-        with:
-          version: 18
-          install-contrib: 'true'
-
       - uses: actions/checkout@v6
-      - run: make
-      - run: sudo make install
-      - run: PGUSER=postgres make installcheck
+      - run: docker build -t plmuggintest .
+      - run: docker run -d -p 5432:5432 -e POSTGRES_USER=test -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=test plmuggintest
+      - uses: iFaxity/wait-on-action@v1.2.1
+        with:
+          resource: tcp:localhost:5432
+          delay: 1000
+          tcpTimeout: 30000
+      - run: psql -h localhost -p 5432 -U test -f mugshot/test/test.sql
+      - run: ./mugshot/test/start.sh
+      - uses: gacts/install-hurl@v1.3.2
+      - run: hurl --test mugshot/test/test.hurl
