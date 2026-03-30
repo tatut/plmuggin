@@ -21,3 +21,9 @@ HTTP 400
 # Check 404
 GET http://localhost:3000/nosuchendpoint
 HTTP 404
+
+# Check path parametrers
+GET http://localhost:3000/2026/04/08
+HTTP 200
+[Asserts]
+xpath "string(//div)" contains "Date 8.4.2026 is 20551 days after the UNIX epoch"
