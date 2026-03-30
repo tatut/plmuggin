@@ -577,19 +577,21 @@ static bool muggin_parse_node(_ctx *ctx, m_Node **to) {
 
 /* Skip metadata section, separated by "---" plus whitespace */
 str muggin_skip_metadata(str input) {
-  str orig;
-  int index;
+  char d1, d2, d3;
 
-  orig = input;
-  index = str_indexof(input, '-');
-  while (index != -1) {
-    input = str_drop(input, index);
-    if (str_char_at(input, 0) == '-' && str_char_at(input, 1) == '-' &&
-        str_char_at(input, 2) == '-') {
-      return str_ltrim(str_drop(input, 3));
+  d1 = str_char_at(input, 0);
+  d2 = str_char_at(input, 1);
+
+  for (int i = 2; i < input.len; i++) {
+    d3 = str_char_at(input, i);
+    if (d3 == '-' && d2 == '-' && d1 == '-') {
+      return str_ltrim(str_drop(input, i + 1));
+    } else {
+      d1 = d2;
+      d2 = d3;
     }
   }
-  return orig;
+  return input;
 }
 
 
