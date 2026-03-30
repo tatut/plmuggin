@@ -372,7 +372,7 @@ bool mugshot_server_start(mugshot_server *s);
 void mugshot_server_accept_loop(mugshot_server *s);
 void mugshot_server_wait(mugshot_server *s);
 
-bool mugshot_path_match(mugshot_endpoint *route, str path);
+bool mugshot_path_match(mugshot_endpoint *route, str path, str *args, bool *has_value);
 
 /* Start server and enter accept loop. */
 void mugshot_serve(mugshot_server *s);
@@ -814,8 +814,15 @@ void mugshot_response_file(mugshot_conn *r) {
   fclose(f);
 }
 
-bool mugshot_path_match(mugshot_endpoint *r, str path) {
+/* Match endpoint route with input URL path.
+ * Extracts values for any path parameters as it goes and
+ */
+bool mugshot_path_match(mugshot_endpoint *r, str path, str *args, bool *has_value) {
   str route_path = r->path;
+  // mark all parameters as not having value
+  for (int i = 0; i < r->nargs; i++)
+    has_value[i] = false;
+
   while(route_path.len && path.len) {
     if (!path.len && route_path.len)
       return false; // route path is longer than given
@@ -824,13 +831,31 @@ bool mugshot_path_match(mugshot_endpoint *r, str path) {
       path = str_drop(path, 1);
       route_path = str_drop(route_path, 1);
     } else if (ch == ':') {
-      // consume parameter in route path
-      route_path = str_drop(route_path, 1); // drop ':'
-      while (route_path.len && str_char_at(route_path, 0) != '/')
-        route_path = str_drop(route_path, 1);
-      // consume parameter in given
-      while (path.len && str_char_at(path, 0) != '/')
-        path = str_drop(path, 1);
+      str name, value;
+      if(!str_splitat(route_path, "/", &name, &route_path)) return false;
+      name = str_drop(name, 1); // drop the ':'
+
+      if (!str_splitat(path, "/", &value, &path))
+        return false;
+      if (!value.len)
+        return false;
+
+      // find the index for the parameter, mark it
+      int arg = -1;
+      for (int i = 0; i < r->nargs; i++) {
+        if (str_eq(r->args[i].name, name)) {
+          arg = i;
+          break;
+        }
+      }
+      if (arg == -1) {
+        LOG_ERROR("Should not happen, path has arg '" STR_FMT
+                  "' but no argument of that name found!",
+                  STR_ARG(name));
+        return false;
+      }
+      args[arg] = value;
+      has_value[arg] = true;
     } else {
       return false;
     }
@@ -849,8 +874,7 @@ bool mugshot_path_match(mugshot_endpoint *r, str path) {
  * PENDING: support Connection: Keep-Alive
  */
 void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
-                      PgConn *conn) {
-  bool missing_parameter = false;
+                      PgConn *conn, str *argvals) {
   size_t cap = 512;
   char sql[512]; // pg identifier max is 63 chars, this is enough
   size_t len = snprintf(sql, cap, "SELECT \"" STR_FMT "\".\"" STR_FMT "\"",
@@ -864,23 +888,10 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
   // PostgreSQL max function parameter number is 100
   // https://www.postgresql.org/docs/current/limits.html
   int argtypes[endpoint->nargs];
-  str argvals[endpoint->nargs];
 
-  // Bind parameters, from HTTP path and form/query parameters
+  // Bind parameter types
   for (int i = 0; i < endpoint->nargs; i++) {
     argtypes[i] = endpoint->args[i].oid;
-    printf("arg(%d) "STR_FMT" OID: %d\n", i, STR_ARG(endpoint->args[i].name), argtypes[i]);
-    if (!mugshot_request_parameter(client, endpoint->args[i].name,
-                                   &argvals[i])) {
-      missing_parameter = true;
-      goto fail;
-    }
-  }
-  // Decode parameters (must be done AFTER we resolved them, because
-  // the decoded value may contain '&' characters which would mess the
-  // splitting)
-  for (int i = 0; i < endpoint->nargs; i++) {
-    str_urldecode(&argvals[i]);
   }
 
   PgResult res = pg_query(conn, sql, endpoint->nargs, argtypes, argvals);
@@ -911,12 +922,9 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
   pg_clear(conn);
   return;
 fail:
-  if (missing_parameter ||
-      (conn->error.severity != ERR_NONE &&
-       strncmp(conn->error.message, "invalid input syntax", 20) == 0)) {
-    // Problem with parameters, either we didn't find a parameter that was
-    // required, or wWe recognize from PostgreSQL error response, that input
-    // parsing failed.
+  if (conn->error.severity != ERR_NONE &&
+      strncmp(conn->error.message, "invalid input syntax", 20) == 0) {
+    // PostgreSQL reported parsing error
     _mugshot_http_fail(client, 400, "Bad request");
   } else {
     // Some other error we don't recognize, say it's "internal"
@@ -991,13 +999,32 @@ void _mugshot_server_worker(mugshot_worker *w) {
       bool handled = false;
       for (size_t i = 0; !handled && i < nroutes; i++) {
         mugshot_endpoint route = s->routes[i];
-        if (mugshot_path_match(&route, c->path)) {
+        str values[route.nargs];
+        bool has_value[route.nargs];
+        if (mugshot_path_match(&route, c->path, values, has_value)) {
+          // Get URL parameters for anything not in route
+          for (int i = 0; i < route.nargs; i++) {
+            if(!has_value[i]) {
+              if (!mugshot_request_parameter(c, route.args[i].name,
+                                             &values[i])) {
+                goto not_found; // responds with 404 if a parameter is not found
+              }
+            }
+          }
+          // Decode parameters (must be done AFTER we resolved them, because
+          // the decoded value may contain '&' characters which would mess the
+          // splitting)
+          for (int i = 0; i < route.nargs; i++) {
+            str_urldecode(&values[i]);
+          }
+
           printf("path matched! \n");
-          mugshot_serve_pg(&route, c, conn);
+          mugshot_serve_pg(&route, c, conn, values);
           //mugshot_print_endpoint(&route);
           handled = true;
         }
       }
+    not_found:
       if(!handled)
         _mugshot_http_fail(c, 404, "Not Found");
       // PENDING: what about keepalive?
