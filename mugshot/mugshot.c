@@ -350,22 +350,6 @@ typedef struct mugshot_server {
   // threads count of workers
   mugshot_worker *workers;
 
-  // active connections
-  mugshot_conn *connections;
-  size_t connections_count;
-  size_t connections_capacity;
-
-  // ring buffer queue of connections waiting to be taken be a worker
-  pthread_cond_t has_waiting_clients;
-  pthread_mutex_t acquire_client;
-  pthread_mutex_t release_client;
-
-  mugshot_conn **waiting_client;
-  int waiting_client_count; // number of waiting clients
-  int first_waiting_client;
-  int last_waiting_client;
-  mugshot_conn *free_client; // free list of connections
-
 } mugshot_server;
 
 void mugshot_print_endpoint(mugshot_endpoint *e);
@@ -1093,10 +1077,6 @@ bool mugshot_server_start(mugshot_server *s) {
   /* Ensure some default options */
   if(s->threads == 0) s->threads = 4;
   if(s->backlog == 0) s->backlog = 10;
-
-  s->has_waiting_clients = (pthread_cond_t) PTHREAD_COND_INITIALIZER;
-  s->acquire_client = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
-  s->release_client = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
 
   struct sockaddr_in server_addr, client_addr;
 
