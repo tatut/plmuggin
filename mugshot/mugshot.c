@@ -1,4 +1,5 @@
 /* Mugshot: serve PL/Muggin templates (and other functions) via HTTP. */
+#include <signal.h>
 const char *mugshot_logo =
   "███╗   ███╗██╗   ██╗ ██████╗ ███████╗██╗  ██╗ ██████╗ ████████╗\n"
   "████╗ ████║██║   ██║██╔════╝ ██╔════╝██║  ██║██╔═══██╗╚══██╔══╝\n"
@@ -26,6 +27,7 @@ const int logo_color[] = {31, 31, 31, 31, 31, 31, 31, 31, 31, 32, 32, 32, 32,
 #include <arpa/inet.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <stdatomic.h>
@@ -34,6 +36,7 @@ const int logo_color[] = {31, 31, 31, 31, 31, 31, 31, 31, 31, 32, 32, 32, 32,
 #ifdef __linux__
 #include <sys/sendfile.h>
 #endif
+
 
 #define USE_MALLOC
 #include "pgwire.h"
@@ -310,7 +313,7 @@ typedef struct mugshot_conn {
   mugshot_conn_state state; // current state
   char *buf; // read/write buffer depending on state
   size_t buf_len; // how much has been read
-  size_t buf_capacity; // how much capacity in the buffer
+  size_t *buf_capacity; // how much capacity in the buffer
   size_t read_pos; // currently reading from
   size_t append_pos; // position append newly received data
 
@@ -747,7 +750,8 @@ void _mugshot_http_read(mugshot_conn *r) {
 
   }
   return;
- fail:
+fail:
+  mugshot_debug("failed parsing");
   r->state = MUGSHOT_CS_ERR;
   _mugshot_http_fail(r, 400, "Bad Request");
 }
@@ -949,7 +953,7 @@ static void ensure_connection(int id, str conn_info, PgConn **connection) {
     if (!conn) {
       mugshot_error("Worker(%d) failed to get PostgreSQL connection, trying again "
                     "in %d seconds.", id, sleep_seconds);
-      sleep(5);
+      sleep(sleep_seconds);
       sleep_seconds = sleep_seconds * 2;
       if(sleep_seconds > 60) sleep_seconds = 60;
     }
@@ -958,39 +962,83 @@ static void ensure_connection(int id, str conn_info, PgConn **connection) {
 }
 
 void _mugshot_server_worker(mugshot_worker *w) {
+  struct sockaddr_in client_addr;
+  int addr_len = sizeof(client_addr);
+
   mugshot_server *s = w->server;
   PgConn *conn = NULL;
 
+  // Each worker maintains its own buffer, initally 8k
+  size_t http_buf_capacity = MUGSHOT_HTTP_MAX_REQUEST_HEADER_SIZE;
+  char *http_buf = NEW_ARR(char, http_buf_capacity);
+  mugshot_conn c = {
+    .buf_capacity = &http_buf_capacity,
+    .buf = http_buf,
+    .headers = NEW_ARR(mugshot_header, MUGSHOT_MAX_HEADERS)
+  };
+
   while (1) {
+    ssize_t read;
+    struct timeval start;
+    int ret;
+
     ensure_connection(w->id, s->connection, &conn);
-    pthread_mutex_lock(&s->acquire_client);
-    while(s->waiting_client_count == 0) {
-      pthread_cond_wait(&s->has_waiting_clients, &s->acquire_client);
+    c._socket = accept(s->server_fd, (struct sockaddr *)&client_addr,
+                       (socklen_t *)&addr_len);
+    if (c._socket < 0) {
+      mugshot_error("Accept failed, errno: %d", errno);
+      sleep(1);
+      continue;
     }
-    mugshot_debug("Have %d waiting clients", s->waiting_client_count);
-    mugshot_conn *c = s->waiting_client[s->first_waiting_client];
-    s->first_waiting_client = (s->first_waiting_client + 1) % 1024;
-    s->waiting_client_count--;
-    pthread_mutex_unlock(&s->acquire_client);
-    mugshot_debug("thread: %d, GOT client with socket %d", w->id, c->_socket);
+    // Print client info
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
+    mugshot_debug("New connection from %s:%d", client_ip, ntohs(client_addr.sin_port));
 
-    const ssize_t read = recv(c->_socket, &c->buf[c->buf_len], c->buf_capacity - c->buf_len,
-                              MSG_DONTWAIT);
-    if(read == 0) {
-      mugshot_debug("connection closed, socket: %d", c->_socket);
-      close(c->_socket);
-      c->_socket = 0;
-      c->state = MUGSHOT_CS_ERR;
-      goto done;
-    } else if (read > 0) {
+    /* Init connection to use this workers buffer */
+    c.state = MUGSHOT_CS_REQ_START;
+    c.buf_len = 0;
+    c.read_pos = 0;
+    c.headers_size = 0;
+
+    gettimeofday(&start, NULL);
+
+    // FIXME: loop and read MAX_LINE chunks, until MUGSHOT_CS_REQ_DONE or
+    // read timeout reached
+  read_again:
+    read = recv(c._socket, &c.buf[c.buf_len],
+                *c.buf_capacity - c.buf_len, MSG_DONTWAIT);
+    if (read > 0) {
       // handle new data
-      mugshot_debug("read %ld bytes from socket %d", read, c->_socket);
-      c->buf_len += read;
-      _mugshot_http_read(c);
-      mugshot_debug("state is now: %d", c->state);
+      mugshot_debug("read %ld bytes from socket %d", read, c._socket);
+      c.buf_len += read;
+      _mugshot_http_read(&c);
+      mugshot_debug("state is now: %d", c.state);
+      goto read_ok;
+    } else if (read < 0 && errno == EAGAIN) {
+      // read again, unless we have already waited over 5s and no data is coming
+      struct timeval end;
+      gettimeofday(&end, NULL);
+      if (end.tv_sec - start.tv_sec > 5)
+        goto close_error;
+      else {
+        printf(" read again, waited %ld sec\n", end.tv_sec - start.tv_sec);
+        goto read_again;
+      }
+    } else { // read 0 (closed) or other error
+      goto close_error;
     }
 
-    if(c->state == MUGSHOT_CS_REQ_DONE) {
+    // We failed to read data, socket was closed or there was some other error
+  close_error:
+    mugshot_debug("connection closed, socket: %d", c._socket);
+    close(c._socket);
+    c._socket = 0;
+    c.state = MUGSHOT_CS_ERR;
+    continue;
+
+  read_ok:
+    if(c.state == MUGSHOT_CS_REQ_DONE) {
       // Done reading request, time to run handler
 
       // Go through handlers to see
@@ -1001,11 +1049,11 @@ void _mugshot_server_worker(mugshot_worker *w) {
         mugshot_endpoint route = s->routes[i];
         str values[route.nargs];
         bool has_value[route.nargs];
-        if (mugshot_path_match(&route, c->path, values, has_value)) {
+        if (mugshot_path_match(&route, c.path, values, has_value)) {
           // Get URL parameters for anything not in route
           for (int i = 0; i < route.nargs; i++) {
             if(!has_value[i]) {
-              if (!mugshot_request_parameter(c, route.args[i].name,
+              if (!mugshot_request_parameter(&c, route.args[i].name,
                                              &values[i])) {
                 goto not_found; // responds with 404 if a parameter is not found
               }
@@ -1019,27 +1067,18 @@ void _mugshot_server_worker(mugshot_worker *w) {
           }
 
           printf("path matched! \n");
-          mugshot_serve_pg(&route, c, conn, values);
+          mugshot_serve_pg(&route, &c, conn, values);
           //mugshot_print_endpoint(&route);
           handled = true;
         }
       }
     not_found:
       if(!handled)
-        _mugshot_http_fail(c, 404, "Not Found");
+        _mugshot_http_fail(&c, 404, "Not Found");
       // PENDING: what about keepalive?
-      close(c->_socket);
-      c->_socket = 0;
-      pthread_mutex_lock(&s->release_client);
-      c->_next = s->free_client;
-      s->free_client = c;
-      pthread_mutex_unlock(&s->release_client);
-
+      close(c._socket);
+      c._socket = 0;
     }
-
-  done:
-    atomic_store(&c->processing, false);
-
   }
 }
 
@@ -1108,124 +1147,6 @@ bool mugshot_server_start(mugshot_server *s) {
   return true;
 }
 
-void mugshot_server_accept_loop(mugshot_server *s) {
-  struct sockaddr_in client_addr;
-  int addr_len = sizeof(client_addr);
-  s->waiting_client_count = 0;
-  s->first_waiting_client = 0;
-  s->last_waiting_client = 0;
-  s->waiting_client = mugshot_new(&s->arena, mugshot_conn*, 1024);
-  s->connections = mugshot_new(&s->arena, mugshot_conn, 1023); // fd_set max - 1
-  if(!s->connections) {
-    mugshot_error("Alloc failed!");
-  }
-  //s->connections_count = 0;
-  s->connections_capacity = 1023;
-
-  // add each connection into free list
-  s->free_client = NULL;
-  size_t i = s->connections_capacity - 1;
-  for(size_t i=0; i < s->connections_capacity; i++) {
-    //mugshot_debug("free client %zu", i);
-    s->connections[i]._next = s->free_client;
-    s->free_client = &s->connections[i];
-  }
-
-  fd_set ready;
-  //struct timeval wait_time = {0, 1000}; // wait at most 1000 microseconds (1ms)
-  while(1) {
-
-    FD_ZERO(&ready);
-
-    // Add listen socket
-    FD_SET(s->server_fd, &ready);
-
-    // Add all connections that are currently not being processed
-    int max_fd = s->server_fd;
-    for(size_t i=0; i < s->connections_capacity; i++) {
-      //mugshot_debug("   connection %zu", i);
-      if(s->connections[i]._socket && !atomic_load(&s->connections[i].processing)) {
-        //mugshot_debug("   client %zu with socket %d selectable", i, s->connections[i]._socket);
-        FD_SET(s->connections[i]._socket, &ready);
-        if(s->connections[i]._socket > max_fd)
-          max_fd = s->connections[i]._socket;
-      }
-    }
-
-    const int activity = select(max_fd + 1, &ready, NULL, NULL, NULL/*&wait_time*/);
-    if(activity < 0 && errno != EINTR) {
-      perror("Select error");
-    }
-
-    const size_t current_connections = s->connections_capacity;
-    if(FD_ISSET(s->server_fd, &ready)) {
-      const int client_socket = accept(s->server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &addr_len);
-      if (client_socket < 0) {
-        mugshot_error("Accept failed, errno: %d", errno);
-        sleep(1);
-        continue;
-      }
-
-      // Print client info
-      char client_ip[INET_ADDRSTRLEN];
-      inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
-      mugshot_debug("New connection from %s:%d", client_ip, ntohs(client_addr.sin_port));
-      bool got_conn = true;
-      pthread_mutex_lock(&s->release_client);
-      mugshot_conn *c = s->free_client;
-      if(!c) {
-        got_conn = false;
-      } else {
-        s->free_client = c->_next;
-      }
-      pthread_mutex_unlock(&s->release_client);
-
-
-      if(!got_conn) {
-         mugshot_error("No free connections, sending 503");
-         // FIXME: do something smarter
-         close(client_socket);
-      } else {
-        mugshot_debug("Got client!");
-        if(c->arena.cur != NULL) {
-          mugshot_arena_clear(&c->arena);
-        }
-        c->state = MUGSHOT_CS_REQ_START;
-        c->_socket = client_socket;
-        c->buf = (char*) mugshot_arena_alloc(&c->arena, MUGSHOT_HTTP_MAX_REQUEST_HEADER_SIZE, 1, 1);
-        c->buf_capacity = MUGSHOT_HTTP_MAX_REQUEST_HEADER_SIZE;
-        c->buf_len = 0;
-        c->read_pos = 0;
-        c->headers = mugshot_new(&c->arena, mugshot_header, MUGSHOT_MAX_HEADERS);
-        c->headers_size = 0;
-      }
-    }
-
-    // Check all active
-    for(size_t i=0; i < current_connections; i++) {
-      if(s->connections[i]._socket && FD_ISSET(s->connections[i]._socket, &ready)) {
-        // Offload this to task queue
-        pthread_mutex_lock(&s->acquire_client);
-        bool work = false;
-        if(s->waiting_client_count == 1024) {
-          mugshot_error("Waiting client pool is full (1024)");
-        } else {
-          // PENDING: instead of queueing, should we just assign a thread?
-          // each worker could have it's own work queue with mutex
-          atomic_store(&s->connections[i].processing, true);
-          s->waiting_client[s->last_waiting_client] = &s->connections[i];
-          s->last_waiting_client = (s->last_waiting_client + 1) % 1024;
-          s->waiting_client_count++;
-          work = true;
-        }
-        // notify some thread that there's a new client waiting
-        pthread_mutex_unlock(&s->acquire_client);
-        if(work) pthread_cond_signal(&s->has_waiting_clients);
-      }
-    }
-  }
-}
-
 void mugshot_server_wait(mugshot_server *s) {
   if(s->state != MUGSHOT_STATE_STARTED) {
     mugshot_error("Can't wait for server that is not started.");
@@ -1240,7 +1161,7 @@ void mugshot_serve(mugshot_server *s) {
   if(mugshot_server_start(s)) {
     mugshot_info("Server started on port %d (backlog %d, worker threads %d)", s->port,
              s->backlog, s->threads);
-    mugshot_server_accept_loop(s);
+    mugshot_server_wait(s);
   } else {
     mugshot_error("Failed to start server.");
   }
@@ -1616,6 +1537,7 @@ int main(int argc, char **argv) {
   print_logo(0);
   printf("\nMugshot starting up.\n");
 
+
   mugshot_server server = {0};
   load_config(argc, argv, &server);
 
@@ -1639,6 +1561,7 @@ int main(int argc, char **argv) {
     row = pg_next_row(conn, &result);
   }
 
+  signal(SIGPIPE, SIG_IGN);
   mugshot_serve(&server);
 
   return 0;
