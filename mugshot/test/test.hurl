@@ -35,3 +35,22 @@ HTTP 404
 # Bad parameter value also gets bad request (expected integer, got "October")
 GET http://localhost:3000/2015/October/21
 HTTP 400
+
+# Post a contact form, check that it returns correct id
+POST http://localhost:3000/form
+[Form]
+email: jdoe@example.com
+name: John Doe
+HTTP 200
+[Asserts]
+jsonpath "$.success" == true
+jsonpath "$.id" == 1
+
+# Post the same contact form again, fails due to unique violation
+POST http://localhost:3000/form
+[Form]
+email: jdoe@example.com
+name: Jane Doe
+HTTP 409
+[Asserts]
+jsonpath "$.success" == false

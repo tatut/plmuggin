@@ -59,6 +59,7 @@ typedef struct PgResult {
 
 typedef struct PgRow {
   bool success, has_row;
+  int row_start; // place in the buffer where this row starts
 } PgRow;
 
 typedef struct PgVal {
@@ -79,6 +80,21 @@ void pg_close(PgConn *conn);
 
 /* Clear all memory buffers. All results and rows are invalid. */
 void pg_clear(PgConn *conn);
+
+/* Put a query to the output buffefr without syncing or reading result.
+ * This can be used to send multiple queries before syncing.
+ */
+bool pg_put_query(PgConn *c, const char* sql, int num_params, int *param_oids,
+                  str *param_data);
+
+/* Put sync message and send current output buffer */
+bool pg_sync(PgConn *c);
+
+/* Expect ready message */
+bool pg_ready(PgConn *c);
+
+/* Read the result of a previously sent query */
+PgResult pg_read_result(PgConn *c);
 
 /* Issue a query and return a result object that describes the row.
  * The result object does not contain the rows, use pg_next_row to get
@@ -103,9 +119,9 @@ bool pg_field(PgConn *c, PgResult res, int field_num, int *oid, char **name);
  * was found and success. */
 PgRow pg_next_row(PgConn *conn, PgResult *res);
 
-/* Read value of nth field in current row.
+/* Read value of nth field in the given row.
  * Return NULL on error. */
-PgVal pg_value(PgConn *c, PgResult *res, int field);
+PgVal pg_value(PgConn *c, PgRow *row, int field);
 
 /* Read the array header */
 PgArray pg_value_arr(PgVal v);

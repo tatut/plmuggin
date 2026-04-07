@@ -41,12 +41,15 @@ const int logo_color[] = {31, 31, 31, 31, 31, 31, 31, 31, 31, 32, 32, 32, 32,
 #define USE_MALLOC
 #include "pgwire.h"
 
+
 #define STR_IMPLEMENTATION
 #include "../str.h"
 #include "util.h"
 
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
+
+
 
 void log_error(const char *error) { fprintf(stderr, "\e[31m[ERROR]\e[0m %s", error); }
 void log_notice(const char *notice) { fprintf(stdout, "%s", notice); }
@@ -141,7 +144,8 @@ typedef enum {
   MUGSHOT_TEXT_HTML,
   MUGSHOT_APPLICATION_JSON,
   MUGSHOT_TEXT_PLAIN,
-  MUGSHOT_APPLICATION_OCTET_STREAM
+  MUGSHOT_APPLICATION_OCTET_STREAM,
+  MUGSHOT_APPLICATION_FORM_URLENCODED // reading in form
 } mugshot_http_content_type;
 
 str mugshot_http_content_type_str[] = {
@@ -308,7 +312,10 @@ typedef struct mugshot_conn {
   int headers_size;
   mugshot_header *headers;
 
-  // internal, not meant for applications to directly use
+  size_t content_length; // if non-zero there is a body
+  size_t body_start;     // start of body in buffer
+  mugshot_http_content_type body_type;
+
   int _socket; // HTTP connection socket
   mugshot_conn_state state; // current state
   char *buf; // read/write buffer depending on state
@@ -317,10 +324,6 @@ typedef struct mugshot_conn {
   size_t read_pos; // currently reading from
   size_t append_pos; // position append newly received data
 
-  atomic_bool processing; // 1 if this is being processed
-
-  // to maintain free list
-  struct mugshot_conn *_next;
 } mugshot_conn;
 
 
@@ -532,6 +535,10 @@ char *mugshot_arena_str(mugshot_arena *arena, char *str) {
 #define MUGSHOT_MAX_HEADERS 64
 #endif
 
+#ifndef MUGSHOT_MAX_BODY
+#define MUGSHOT_MAX_BODY 1 << 23
+#endif
+
 void mugshot_add_endpoint(mugshot_server *s, mugshot_endpoint route) {
   arrput(s->routes, route);
 }
@@ -593,6 +600,25 @@ void mugshot_http_ok(mugshot_conn *r) {
   out_constant(r, "HTTP/1.1 200 OK\r\n");
 }
 
+void mugshot_http_status(mugshot_conn *r, PgVal status_setting) {
+  out_constant(r, "HTTP/1.1 ");
+  str status = (str){.data = status_setting.data, .len = status_setting.len};
+  out_str(r, status);
+  printf("settings status: %.*s\n", STR_ARG(status));
+  if (str_eq_constant(status, "200"))
+    out_constant(r," OK\r\n");
+  else if (str_eq_constant(status, "404"))
+    out_constant(r," Not Found\r\n");
+  else if (str_eq_constant(status, "403"))
+    out_constant(r," Forbidden\r\n");
+  else if (str_eq_constant(status, "400"))
+    out_constant(r," Bad Request\r\n");
+  else if (str_eq_constant(status, "409"))
+    out_constant(r, " Conflict\r\n");
+  else
+    // PENDING: allow code to set the message as well?
+    out_constant(r, " Done\r\n");
+}
 /* Output an HTTP header line */
 void mugshot_http_header(mugshot_conn *r, str header, str value) {
   out_str(r,header);
@@ -619,6 +645,9 @@ void mugshot_http_body(mugshot_conn *r, str body) {
 
 void _mugshot_http_read(mugshot_conn *r) {
   char *line;
+  r->content_length = 0;
+  r->body_start = 0;
+  r->body_type = MUGSHOT_APPLICATION_OCTET_STREAM; // default to just bytes, if unspecified
   while(_mugshot_http_read_line(r, &line)) {
     mugshot_debug("<< %s", line);
     mugshot_debug("state: %d", r->state);
@@ -698,20 +727,41 @@ void _mugshot_http_read(mugshot_conn *r) {
       break;
     }
     case MUGSHOT_CS_REQ_HEADERS: {
-      if(line[0] == 0) {
-        // PENDING: do we need body?
-        r->state = MUGSHOT_CS_REQ_DONE;
+      if (line[0] == 0) {
+        if (r->content_length) {
+          r->state = MUGSHOT_CS_REQ_BODY;
+          r->body_start = r->read_pos;
+        } else {
+          r->state = MUGSHOT_CS_REQ_DONE;
+        }
       } else {
         char *name = line;
         char *split = strstr(line, ": ");
+        char *value = split+2;
         if(!split) goto fail;
         *split = 0;
         if(r->headers_size == MUGSHOT_MAX_HEADERS) {
           mugshot_error("Too many headers in request, max is %d.", MUGSHOT_MAX_HEADERS);
           goto fail;
         } else {
+          if (strcmp(name, "Content-Length") == 0) {
+            long len = atoi(value);
+            printf("got content length: %ld\n", len);
+            if (len < 0 || len > MUGSHOT_MAX_BODY) {
+              mugshot_error("Invalid Content-Length: %ld", len);
+              goto fail;
+            }
+            r->content_length = len;
+          } else if (strcmp(name, "Content-Type") == 0) {
+            if (strcmp(value, "application/x-www-form-urlencoded") == 0) {
+              r->body_type = MUGSHOT_APPLICATION_FORM_URLENCODED;
+            } else if (strcmp(value, "application/json") == 0) {
+              r->body_type = MUGSHOT_APPLICATION_JSON;
+            }
+          }
+          //PENDING: need headers to use positions in buffer, instead of pointers, if we realloc the input
           r->headers[r->headers_size].name = name;
-          r->headers[r->headers_size].value = name+2;
+          r->headers[r->headers_size].value = value;
           r->headers_size++;
         }
       }
@@ -731,8 +781,33 @@ void _mugshot_http_read(mugshot_conn *r) {
       } else if(strcmp(name, "Sec-WebSocket-Key")==0) {
       c->data.ws.key = arena_str(&c->arena, value);
       }*/
+  }
+
+  if (r->state == MUGSHOT_CS_REQ_BODY) {
+    //printf("READING BODY\n");
+    // Make sure body fits in our buffer
+    char *body;
+    if (*r->buf_capacity < (r->body_start + r->content_length)) {
+      r->buf = REALLOC(r->buf, r->body_start + r->content_length);
+      *r->buf_capacity = r->body_start + r->content_length;
+      if (!r->buf)
+        goto fail;
+    }
+    body = &r->buf[r->body_start];
+    long body_read = r->buf_len - r->body_start;
+    while (body_read < r->content_length) {
+      //printf("body_read %zu < content_length %zu\n", body_read, r->content_length);
+      // Try to read more of the body
+      ssize_t read = recv(r->_socket, &r->buf[r->buf_len],
+                          r->content_length - body_read, MSG_DONTWAIT);
+      if(read == -1) goto fail;
+      body_read += read;
+    }
+    r->state = MUGSHOT_CS_REQ_DONE;
+    //printf("GOT BODY (size: %zu)\n<<<%.*s>>>\n", r->content_length, (int) r->content_length, body);
 
   }
+
   return;
 fail:
   mugshot_debug("failed parsing");
@@ -756,10 +831,9 @@ bool mugshot_response_static(mugshot_conn *req, const char *content_type,
   return true;
 }
 
-bool mugshot_request_parameter(mugshot_conn *req, str name, str *value) {
-  // try query parameters
+bool get_form_parameter(str parameters, str name, str *value) {
   str parameter;
-  str rest = req->query_parameters;
+  str rest = parameters;
   while (str_splitat(rest, "&", &parameter, &rest)) {
     str n, val;
     if (str_splitat(parameter, "=", &n, &val)) {
@@ -769,8 +843,18 @@ bool mugshot_request_parameter(mugshot_conn *req, str name, str *value) {
       }
     }
   }
-  // PENDING: try form parameters
-
+  return false;
+}
+bool mugshot_request_parameter(mugshot_conn *req, str name, str *value) {
+  // try query parameters
+  if (get_form_parameter(req->query_parameters, name, value))
+    return true;
+  if (req->body_type == MUGSHOT_APPLICATION_FORM_URLENCODED) {
+    if (get_form_parameter((str){.data = &req->buf[req->body_start],
+                                 .len = req->content_length},
+                           name, value))
+      return true;
+  }
   return false;
 }
 
@@ -882,30 +966,70 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
     argtypes[i] = endpoint->args[i].oid;
   }
 
-  PgResult res = pg_query(conn, sql, endpoint->nargs, argtypes, argvals);
+  if(!pg_put_query(conn, "SET mugshot.http_status TO '200'", 0, NULL, NULL)) goto fail;
+  if (!pg_put_query(conn, sql, endpoint->nargs, argtypes, argvals))
+    goto fail;
+  if (!pg_put_query(conn, "SELECT current_setting('mugshot.http_status')", 0,
+                    NULL, NULL))
+    goto fail;
+  if (!pg_sync(conn))
+    goto fail;
 
+  PgResult res;
+
+  res = pg_read_result(conn);
+  if (!res.success)
+    goto fail;
+  printf("set setting succeeded\n");
+
+  res = pg_read_result(conn);
   if (!res.success) {
     mugshot_error("PostgreSQL function call query failed, see database logs.");
     goto fail;
   } else {
     PgRow row = pg_next_row(conn, &res);
+    PgVal response;
     if (!row.has_row) {
-      _mugshot_http_fail(client, 204, "No Content");
-    } else {
-      PgVal v = pg_value(conn, &res, 0);
-      mugshot_http_ok(client);
-      mugshot_http_header(
-          client, str_constant("Content-Type"),
-          mugshot_http_content_type_str[endpoint->content_type]);
-      mugshot_http_header_sz(client, str_constant("Content-Length"), v.len);
-      mugshot_http_header(client, str_constant("Connection"), str_constant("close"));
-      mugshot_http_body(client, (str){.len=v.len, .data=v.data});
+      mugshot_error("Function didn't return a response.");
+      goto fail;
     }
+    response = pg_value(conn, &row, 0);
+
     row = pg_next_row(conn, &res);
     if (!row.success || row.has_row) {
       mugshot_error("Unexpected extra row in PostgreSQL function call.");
       goto fail;
     }
+
+    res = pg_read_result(conn); // read the status setting
+    if (!res.success) {
+      mugshot_error("Failed to read result for settings query");
+      goto fail;
+    }
+    PgRow status_row = pg_next_row(conn, &res);
+    if (!status_row.has_row) {
+      mugshot_error("Status setting row missing");
+      goto fail;
+    }
+
+    PgVal status = pg_value(conn, &status_row, 0);
+    PgRow empty = pg_next_row(conn, &res);
+    if (empty.has_row) {
+      mugshot_error("Unexpected extra row after status row");
+      goto fail;
+    }
+    mugshot_http_status(client, status);
+    mugshot_http_header(
+                        client, str_constant("Content-Type"),
+                        mugshot_http_content_type_str[endpoint->content_type]);
+    mugshot_http_header_sz(client, str_constant("Content-Length"), response.len);
+    mugshot_http_header(client, str_constant("Connection"), str_constant("close"));
+    mugshot_http_body(client, (str){.len=response.len, .data=response.data});
+  }
+  if (!pg_ready(conn)) {
+    mugshot_error(
+        "Expected ready message after results, closing PostgreSQL connection.");
+    pg_close(conn); // FIXME: free this!
   }
   pg_clear(conn);
   return;
@@ -1381,10 +1505,10 @@ bool mugshot_read_method(str *route, mugshot_http_method *method) {
   return false;
 }
 
-bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) {
+bool mugshot_read_endpoint(PgConn *conn, PgRow *row, mugshot_endpoint *e) {
   PgVal v;
 
-  v = pg_value(conn, result, 0); // arg len
+  v = pg_value(conn, row, 0); // arg len
   e->nargs = ntohl(*((int32_t*)v.data)); // atoi(v.data);
   e->args = NEW_ARR(mugshot_endpoint_arg, e->nargs);
   if (!e->args) {
@@ -1392,7 +1516,7 @@ bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) 
     exit(1);
   }
 
-  v = pg_value(conn, result, 1); // arg types
+  v = pg_value(conn, row, 1); // arg types
   PgArray arr = pg_value_arr(v);
   int *value = (int32_t*)arr.data;
   for (int i = 0; i < e->nargs; i++) {
@@ -1409,7 +1533,7 @@ bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) 
    *
    * Any :param reference ends in the next '/' character or end.
    */
-  v = pg_value(conn, result, 2); // argnames
+  v = pg_value(conn, row, 2); // argnames
   arr = pg_value_arr(v);
   for (int i = 0; i < e->nargs; i++) {
     int32_t len = ntohl(*((int32_t *)arr.data));
@@ -1419,14 +1543,14 @@ bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) 
     //printf("arg %i name %d: %.*s\n", i, len, STR_ARG(name));
     arr.data += len;
   }
-  v = pg_value(conn, result, 3); // content type
+  v = pg_value(conn, row, 3); // content type
   //printf(" CONTENT TYPE: '%.*s'\n", (int)v.len, v.data);
   if (!mugshot_read_content_type((str){.len = v.len, .data = v.data},
                                  &e->content_type)) {
     return false;
   }
 
-  v = pg_value(conn, result, 4); // route
+  v = pg_value(conn, row, 4); // route
   str route = (str){.len = v.len, .data = v.data};
   if (!mugshot_read_method(&route, &e->method)) {
     return false;
@@ -1445,7 +1569,7 @@ bool mugshot_read_endpoint(PgConn *conn, PgResult *result, mugshot_endpoint *e) 
     }
   }
 
-  v = pg_value(conn, result, 5); // name
+  v = pg_value(conn, row, 5); // name
   e->name = str_dup((str){.len = v.len, .data = v.data});
 
   return true;
@@ -1534,7 +1658,7 @@ int main(int argc, char **argv) {
   while (row.has_row) {
     mugshot_endpoint e = {.schema = server.schema};
     printf("-------------\n");
-    mugshot_read_endpoint(conn, &result, &e);
+    mugshot_read_endpoint(conn, &row, &e);
     mugshot_print_endpoint(&e);
 
     mugshot_add_endpoint(&server, e);

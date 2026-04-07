@@ -320,6 +320,12 @@ static bool put_sync(PgConn *c) {
   return true;
 }
 
+bool pg_sync(PgConn *c) {
+  if(!put_sync(c)) return false;
+  if(!pg_send(c)) return false;
+  return true;
+}
+
 static bool handle_notice(PgConn *c, int size) {
   if(!pg_ensure_buf(c, size)) return false;
   char *notice = &c->buf[c->buf_pos];
@@ -431,7 +437,12 @@ static bool expect_ready(PgConn *c) {
   return expect_msg(c, 'Z', 5);
 }
 
+bool pg_ready(PgConn *c) {
+  return expect_ready(c);
+}
+
 void pg_clear(PgConn *c) {
+  if(c->sockfd == -1) return;
   c->buf_pos = 0;
   c->error.severity = ERR_NONE;
   c->error.message[0] = 0;
@@ -443,18 +454,20 @@ void pg_clear(PgConn *c) {
   }
 }
 
-/* Issue a query, sends parse and bind messages. */
-PgResult pg_query(PgConn *c, const char *sql, int num_params, int *param_oids,
-                  str *param_data) {
+bool pg_put_query(PgConn *c, const char *sql, int num_params, int *param_oids,
+                   str *param_data) {
   if (!put_parse(c, sql, num_params, param_oids)) goto fail;
   if (!put_bind(c, num_params, param_data)) goto fail;
   if (!put_describe_portal(c)) goto fail;
-  if (!put_execute(c)) goto fail;
-  if (!put_sync(c)) goto fail;
-  if(!pg_send(c)) goto fail;
+  if (!put_execute(c))
+    goto fail;
+  return true;
+fail:
+  return false;
+}
 
-  c->buf_pos = 0;
 
+PgResult pg_read_result(PgConn *c) {
   // expect ParseComplete ('1') and BindComplete ('2') messages
   if(!expect_simple(c, '1')) goto fail;
   if(!expect_simple(c, '2')) goto fail;
@@ -464,7 +477,6 @@ PgResult pg_query(PgConn *c, const char *sql, int num_params, int *param_oids,
   if(msg.type == 'n') {
     /* got NoData, this executed ok */
     if(!expect_msg(c, 'C', -1)) goto fail; // expect command complete
-    if(!expect_ready(c)) goto fail;
     return (PgResult) { true, 0, 0, 0 };
   } else if(msg.type != 'T') {
     err("Expected RowDescription ('B') message, got: %c", msg.type);
@@ -480,6 +492,22 @@ PgResult pg_query(PgConn *c, const char *sql, int num_params, int *param_oids,
   get_i16(c, pos, res.fields);
 
   return res;
+
+ fail:
+  c->buf_pos = 0;
+  return (PgResult) { false, 0, 0 };
+}
+
+/* Issue a query, sends parse and bind messages. */
+PgResult pg_query(PgConn *c, const char *sql, int num_params, int *param_oids,
+                  str *param_data) {
+  if(!pg_put_query(c, sql, num_params, param_oids, param_data)) goto fail;
+  if (!put_sync(c)) goto fail;
+  if(!pg_send(c)) goto fail;
+
+  c->buf_pos = 0;
+
+  return pg_read_result(c);
 
  fail:
   c->buf_pos = 0;
@@ -511,10 +539,11 @@ bool pg_field(PgConn *c, PgResult res, int field_num, int *oid_out, char **name_
 }
 
 PgRow pg_next_row(PgConn *c, PgResult *res) {
-  if(res->row_start != -1) {
+  // PENDING: don't invalidate the old row
+  /*if(res->row_start != -1) {
     // invalidate old row, read on top of it
     c->buf_pos = res->row_start;
-  }
+    }*/
   PgMessage m;
  message:
    if (!read_msg(c, &m))
@@ -522,11 +551,10 @@ PgRow pg_next_row(PgConn *c, PgResult *res) {
    switch (m.type) {
    case 'D': { // DataRow
      res->row_start = m.data;
-     return (PgRow){true, true};
+     return (PgRow){true, true, m.data};
    }
    case 'C': { // CommandComplete
-     if(!expect_ready(c)) goto fail;
-     return (PgRow){true, false};
+     return (PgRow){true, false, -1};
    }
    case 'N': { // Notice (PENDING: should we have some "notice handler" callback
                // option?)
@@ -559,12 +587,12 @@ PgRow pg_next_row(PgConn *c, PgResult *res) {
   }
 
  fail:
-  return (PgRow) { false, false };
+   return (PgRow) { false, false, -1 };
  }
 
 
-PgVal pg_value(PgConn *c, PgResult *res, int field) {
-  size_t pos = res->row_start;
+PgVal pg_value(PgConn *c, PgRow *row, int field) {
+  size_t pos = row->row_start;
   if(pos == -1) goto fail;
   short fields;
   get_i16(c, pos, fields);
