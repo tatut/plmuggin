@@ -48,3 +48,12 @@ EXCEPTION
     RETURN '{"success": false}';
 END
 $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION web."GET/numbers"(lo INTEGER, hi INTEGER) RETURNS "text/html" AS $$
+html
+  head
+    title Numbers from {{lo}} to {{hi}}
+  body
+    div.numbers(m:q="SELECT generate_series({{lo}},{{hi}}) as n")
+      span.number {{n}}
+$$ LANGUAGE plmuggin;

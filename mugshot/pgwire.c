@@ -19,7 +19,7 @@
 
 /* Read to given memory */
 static bool read_to(PgConn *c, char *to, size_t bytes) {
-  ssize_t count = read(c->sockfd, to, bytes);
+  ssize_t count = recv(c->sockfd, to, bytes, MSG_WAITALL);
   if(count != bytes) {
     err("Could not read from socket, expected %zu bytes, got %zu.", bytes, count);
     return false;
@@ -241,11 +241,10 @@ bool pg_ensure_buf(PgConn *c, size_t extra) {
     dbg("wanted %zd, current %zd", wanted, size);
     size_t new_size = c->buf_size * BUFFER_INCREASE_FACTOR;
     size_t increase = new_size - size;
-    if(increase < MIN_BUFFER_INCREASE) {
+    if (new_size < wanted || increase > MAX_BUFFER_INCREASE) {
+          new_size = wanted;
+    } else if(increase < MIN_BUFFER_INCREASE) {
       new_size = size + MIN_BUFFER_INCREASE;
-    } else if(increase > MAX_BUFFER_INCREASE) {
-      // if some huge increase is coming, only increase by wanted amount
-      new_size = wanted;
     }
     dbg("realloc from %zd to %zd", size, new_size);
     char *new_buf = realloc(c->buf, new_size);

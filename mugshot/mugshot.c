@@ -744,7 +744,7 @@ void _mugshot_http_read(mugshot_conn *r) {
           mugshot_error("Too many headers in request, max is %d.", MUGSHOT_MAX_HEADERS);
           goto fail;
         } else {
-          if (strcmp(name, "Content-Length") == 0) {
+          if (strcasecmp(name, "Content-Length") == 0) {
             long len = atoi(value);
             printf("got content length: %ld\n", len);
             if (len < 0 || len > MUGSHOT_MAX_BODY) {
@@ -752,7 +752,7 @@ void _mugshot_http_read(mugshot_conn *r) {
               goto fail;
             }
             r->content_length = len;
-          } else if (strcmp(name, "Content-Type") == 0) {
+          } else if (strcasecmp(name, "Content-Type") == 0) {
             if (strcmp(value, "application/x-www-form-urlencoded") == 0) {
               r->body_type = MUGSHOT_APPLICATION_FORM_URLENCODED;
             } else if (strcmp(value, "application/json") == 0) {

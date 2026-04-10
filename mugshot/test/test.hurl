@@ -42,9 +42,11 @@ POST http://localhost:3000/form
 email: jdoe@example.com
 name: John Doe
 HTTP 200
+[Captures]
+john_id: jsonpath "$.id"
 [Asserts]
 jsonpath "$.success" == true
-jsonpath "$.id" == 1
+jsonpath "$.id" >= 1
 
 # Post the same contact form again, fails due to unique violation
 POST http://localhost:3000/form
@@ -54,3 +56,20 @@ name: Jane Doe
 HTTP 409
 [Asserts]
 jsonpath "$.success" == false
+
+# Post a new email, get the next id
+POST http://localhost:3000/form
+[Form]
+email: jane.doe@example.com
+name: Jane Doe
+HTTP 200
+[Asserts]
+jsonpath "$.success" == true
+jsonpath "$.id" > {{john_id}}
+
+# Get numbers
+GET http://localhost:3000/numbers?lo=420&hi=10000
+HTTP 200
+[Asserts]
+xpath "string(//div/span[position()=1]/text())" == "420"
+xpath "string(//div/span[position()=9581]/text())" == "10000"
