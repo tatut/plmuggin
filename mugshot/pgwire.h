@@ -65,7 +65,7 @@ typedef struct PgRow {
 typedef struct PgVal {
   bool success, is_null;
   size_t len;
-  char *data;
+  size_t buf_pos; // the position in the buffer where this data starts
 } PgVal;
 
 /* Array header info */
@@ -123,11 +123,13 @@ PgRow pg_next_row(PgConn *conn, PgResult *res);
  * Return NULL on error. */
 PgVal pg_value(PgConn *c, PgRow *row, int field);
 
-/* Read the array header */
-PgArray pg_value_arr(PgVal v);
+str pg_value_str(PgConn *c, PgVal v);
 
-#define MIN_BUFFER_SIZE 512
-#define MIN_BUFFER_INCREASE 512
+/* Read the array header */
+PgArray pg_value_arr(PgConn *c, PgVal v);
+
+#define MIN_BUFFER_SIZE 4096
+#define MIN_BUFFER_INCREASE 8192
 #define MAX_BUFFER_INCREASE (5*1024*1024)
 #define BUFFER_INCREASE_FACTOR 1.618
 

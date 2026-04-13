@@ -235,18 +235,18 @@ void pg_close(PgConn *c) {
 
 bool pg_ensure_buf(PgConn *c, size_t extra) {
   //printf("pg_ensure_buf(%p), pos: %zu, size: %zu, extra: %zu\n", c->buf, c->buf_pos, c->buf_size, extra);
-  size_t wanted = c->buf_pos + extra;
+  size_t wanted = c->buf_pos + extra + MIN_BUFFER_INCREASE;
   size_t size = c->buf_size;
   if(wanted > size) {
     dbg("wanted %zd, current %zd", wanted, size);
     size_t new_size = c->buf_size * BUFFER_INCREASE_FACTOR;
     size_t increase = new_size - size;
     if (new_size < wanted || increase > MAX_BUFFER_INCREASE) {
-          new_size = wanted;
+      new_size = wanted;
     } else if(increase < MIN_BUFFER_INCREASE) {
       new_size = size + MIN_BUFFER_INCREASE;
     }
-    dbg("realloc from %zd to %zd", size, new_size);
+    dbg("realloc from (%p) %zd to %zd", c->buf, size, new_size);
     char *new_buf = realloc(c->buf, new_size);
     if(new_buf == NULL) {
       err("Unable to allocate more buffer space, at: %zu, need: %zu",
@@ -589,6 +589,10 @@ PgRow pg_next_row(PgConn *c, PgResult *res) {
    return (PgRow) { false, false, -1 };
  }
 
+str pg_value_str(PgConn *c, PgVal v) {
+  if(v.is_null) return (str){0};
+  return (str){.len = v.len, .data = &c->buf[v.buf_pos]};
+}
 
 PgVal pg_value(PgConn *c, PgRow *row, int field) {
   size_t pos = row->row_start;
@@ -603,29 +607,30 @@ PgVal pg_value(PgConn *c, PgRow *row, int field) {
     if(len == -1) {
       v.is_null = true;
       v.len = 0;
-      v.data = NULL;
+      v.buf_pos = 0;
     } else {
       v.is_null = false;
       v.len = len;
-      v.data = &c->buf[pos];
+      v.buf_pos = pos;
       pos += len;
     }
   }
   v.success = true;
   return v;
  fail:
-    return (PgVal) { false, false, 0, NULL };
+    return (PgVal) { false, false, 0, 0 };
 }
 
-PgArray pg_value_arr(PgVal val) {
+PgArray pg_value_arr(PgConn *c, PgVal val) {
   PgArray a = {0};
-  int32_t *values = (int32_t *)val.data;
+  char *data = &c->buf[val.buf_pos];
+  int32_t *values = (int32_t *)data;
   a.ndim = ntohl(values[0]);
   a.has_null = ntohl(values[1]);
   a.element_type = ntohl(values[2]);
   a.dim_size = ntohl(values[3]);
   a.lower_bound = ntohl(values[4]);
-  a.data = val.data + 20;
+  a.data = data + 20;
   return a;
 }
 

@@ -600,9 +600,9 @@ void mugshot_http_ok(mugshot_conn *r) {
   out_constant(r, "HTTP/1.1 200 OK\r\n");
 }
 
-void mugshot_http_status(mugshot_conn *r, PgVal status_setting) {
+void mugshot_http_status(mugshot_conn *r, PgConn *c, PgVal status_setting) {
   out_constant(r, "HTTP/1.1 ");
-  str status = (str){.data = status_setting.data, .len = status_setting.len};
+  str status = pg_value_str(c, status_setting);
   out_str(r, status);
   printf("settings status: %.*s\n", STR_ARG(status));
   if (str_eq_constant(status, "200"))
@@ -639,6 +639,7 @@ void mugshot_http_header_sz(mugshot_conn *r, str header, size_t value) {
 /* Output body, ends headers */
 void mugshot_http_body(mugshot_conn *r, str body) {
   out_constant(r, "\r\n");
+  printf("writing body data: %p len: %zu\n", body.data, body.len);
   write(r->_socket, body.data, body.len);
 }
 
@@ -1018,13 +1019,13 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
       mugshot_error("Unexpected extra row after status row");
       goto fail;
     }
-    mugshot_http_status(client, status);
+    mugshot_http_status(client, conn, status);
     mugshot_http_header(
                         client, str_constant("Content-Type"),
                         mugshot_http_content_type_str[endpoint->content_type]);
     mugshot_http_header_sz(client, str_constant("Content-Length"), response.len);
     mugshot_http_header(client, str_constant("Connection"), str_constant("close"));
-    mugshot_http_body(client, (str){.len=response.len, .data=response.data});
+    mugshot_http_body(client, pg_value_str(conn, response));
   }
   if (!pg_ready(conn)) {
     mugshot_error(
@@ -1509,7 +1510,7 @@ bool mugshot_read_endpoint(PgConn *conn, PgRow *row, mugshot_endpoint *e) {
   PgVal v;
 
   v = pg_value(conn, row, 0); // arg len
-  e->nargs = ntohl(*((int32_t*)v.data)); // atoi(v.data);
+  e->nargs = ntohl(*((int32_t*)(&conn->buf[v.buf_pos]))); // atoi(v.data);
   e->args = NEW_ARR(mugshot_endpoint_arg, e->nargs);
   if (!e->args) {
     err("Out of memory for endpoint arguments");
@@ -1517,7 +1518,7 @@ bool mugshot_read_endpoint(PgConn *conn, PgRow *row, mugshot_endpoint *e) {
   }
 
   v = pg_value(conn, row, 1); // arg types
-  PgArray arr = pg_value_arr(v);
+  PgArray arr = pg_value_arr(conn, v);
   int *value = (int32_t*)arr.data;
   for (int i = 0; i < e->nargs; i++) {
     e->args[i].oid = ntohl(value[i*2 + 1]); // skip len for each entry, we know its 4
@@ -1534,7 +1535,7 @@ bool mugshot_read_endpoint(PgConn *conn, PgRow *row, mugshot_endpoint *e) {
    * Any :param reference ends in the next '/' character or end.
    */
   v = pg_value(conn, row, 2); // argnames
-  arr = pg_value_arr(v);
+  arr = pg_value_arr(conn, v);
   for (int i = 0; i < e->nargs; i++) {
     int32_t len = ntohl(*((int32_t *)arr.data));
     arr.data += 4;
@@ -1545,13 +1546,13 @@ bool mugshot_read_endpoint(PgConn *conn, PgRow *row, mugshot_endpoint *e) {
   }
   v = pg_value(conn, row, 3); // content type
   //printf(" CONTENT TYPE: '%.*s'\n", (int)v.len, v.data);
-  if (!mugshot_read_content_type((str){.len = v.len, .data = v.data},
+  if (!mugshot_read_content_type((str){.len = v.len, .data = &conn->buf[v.buf_pos]},
                                  &e->content_type)) {
     return false;
   }
 
   v = pg_value(conn, row, 4); // route
-  str route = (str){.len = v.len, .data = v.data};
+  str route = (str){.len = v.len, .data = &conn->buf[v.buf_pos]};
   if (!mugshot_read_method(&route, &e->method)) {
     return false;
   }
@@ -1570,7 +1571,7 @@ bool mugshot_read_endpoint(PgConn *conn, PgRow *row, mugshot_endpoint *e) {
   }
 
   v = pg_value(conn, row, 5); // name
-  e->name = str_dup((str){.len = v.len, .data = v.data});
+  e->name = str_dup((str){.len = v.len, .data = &conn->buf[v.buf_pos]});
 
   return true;
 
