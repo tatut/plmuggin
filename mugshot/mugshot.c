@@ -142,6 +142,7 @@ const char *mugshot_http_method_string[] = {
 
 typedef enum {
   MUGSHOT_TEXT_HTML,
+  MUGSHOT_TEXT_CSS,
   MUGSHOT_APPLICATION_JSON,
   MUGSHOT_TEXT_PLAIN,
   MUGSHOT_APPLICATION_OCTET_STREAM,
@@ -150,6 +151,7 @@ typedef enum {
 
 str mugshot_http_content_type_str[] = {
   [MUGSHOT_TEXT_HTML] = str_constant("text/html"),
+  [MUGSHOT_TEXT_CSS] = str_constant("text/css"),
   [MUGSHOT_APPLICATION_JSON] = str_constant("application/json"),
   [MUGSHOT_TEXT_PLAIN] = str_constant("text/plain"),
   [MUGSHOT_APPLICATION_OCTET_STREAM] = str_constant("application/octet-stream")};
@@ -607,6 +609,8 @@ void mugshot_http_status(mugshot_conn *r, PgConn *c, PgVal status_setting) {
   printf("settings status: %.*s\n", STR_ARG(status));
   if (str_eq_constant(status, "200"))
     out_constant(r," OK\r\n");
+  else if(str_eq_constant(status, "204"))
+    out_constant(r," No Content\r\n");
   else if (str_eq_constant(status, "404"))
     out_constant(r," Not Found\r\n");
   else if (str_eq_constant(status, "403"))
@@ -950,10 +954,10 @@ void mugshot_serve_pg(mugshot_endpoint *endpoint, mugshot_conn *client,
                       PgConn *conn, str *argvals) {
   size_t cap = 512;
   char sql[512]; // pg identifier max is 63 chars, this is enough
-  size_t len = snprintf(sql, cap, "SELECT \"" STR_FMT "\".\"" STR_FMT "\"",
+  size_t len = snprintf(sql, cap, "SELECT \"" STR_FMT "\".\"" STR_FMT "\"(",
                         STR_ARG(endpoint->schema), STR_ARG(endpoint->name));
   for (int a = 0; a < endpoint->nargs; a++) {
-    len += snprintf(&sql[len], cap - len, "%c$%d", a ? ',' : '(', a+1);
+    len += snprintf(&sql[len], cap - len, "%s$%d", a ? "," : "", a+1);
   }
   len += snprintf(&sql[len], cap - len, ");");
   printf("SQL(%zu): '%s'\n", len, sql);
@@ -1480,6 +1484,8 @@ const char *query_endpoints =
 bool mugshot_read_content_type(str ct, mugshot_http_content_type *type) {
   if (str_eq_constant(ct, "text") || str_eq_constant(ct, "text/html")) {
     *type = MUGSHOT_TEXT_HTML;
+  } else if (str_eq_constant(ct, "text/css")) {
+    *type = MUGSHOT_TEXT_CSS;
   } else if (str_eq_constant(ct, "bytea") ||
              str_eq_constant(ct,"application/octet-stream")) {
     *type = MUGSHOT_APPLICATION_OCTET_STREAM;
