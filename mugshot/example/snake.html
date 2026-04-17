@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Snake Game</title>
+  <link rel="stylesheet" href="snake.css" />
+</head>
+<body>
+  <div class="game game-over">
+    <header class="game-header">
+      <div class="score-panel">
+        <span class="score-label">Score</span>
+        <span class="score-value">42</span>
+      </div>
+      <div class="level-panel">
+        <span class="level-label">Level</span>
+        <span class="level-value">3</span>
+      </div>
+      <div class="spacer"></div>
+      <button class="new-game-btn">New Game</button>
+    </header>
+
+    <div class="grid">
+      <div class="game-over-overlay">
+        <div class="game-over-title">Game Over</div>
+        <div class="game-over-score">Final score: <span>42</span></div>
+        <button class="game-over-new-game-btn">Play Again</button>
+      </div>
+      <div class="cell apple" style="top:128px;left:512px"></div>
+      <div class="cell apple" style="top:224px;left:112px"></div>
+      <div class="cell apple" style="top:480px;left:400px"></div>
+      <div class="cell snake" style="top:320px;left:304px"></div>
+      <div class="cell snake" style="top:320px;left:288px"></div>
+      <div class="cell snake" style="top:320px;left:272px"></div>
+      <div class="cell snake" style="top:320px;left:256px"></div>
+      <div class="cell snake" style="top:320px;left:240px"></div>
+      <div class="cell snake" style="top:320px;left:224px"></div>
+      <div class="cell snake" style="top:320px;left:208px"></div>
+      <div class="cell snake-head" style="top:320px;left:320px"></div>
+    </div>
+  </div>
+</body>
+</html>
