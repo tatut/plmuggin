@@ -233,6 +233,7 @@ static bool valid_tag(char ch, bool first) {
 }
 
 static bool valid_attr(char ch, bool first) {
+  if(ch == '_') return true; // allow _ in attr name
   if(ch == ':' && !first) return true; // allow ':' in attr name (for namespace)
   return valid_tag(ch, first); // so far they are the same
 }
