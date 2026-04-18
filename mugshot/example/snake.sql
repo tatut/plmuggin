@@ -63,17 +63,93 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
--- Render game grid
+-- Function to get all the game items for render
+CREATE OR REPLACE FUNCTION game.entities() RETURNS SETOF RECORD AS $$
+DECLARE
+  snake_tail integer; snake_head integer;
+  cls text;
+  r record;
+  g_over boolean;
+BEGIN
+  SELECT min(id), max(id) INTO snake_tail, snake_head FROM snake_pos;
+  -- Return all snake positions
+  FOR r IN SELECT x, y,
+                  LAG(x) OVER w AS px, LAG(y) OVER w AS py,
+                  LEAD(x) OVER w as nx, LEAD(y) OVER w as ny
+               FROM snake_pos
+             WINDOW w AS (ORDER BY id ASC)
+             ORDER BY id ASC
+  LOOP
+    IF r.px IS NULL THEN
+      cls := 'snake-tail';
+      -- Add border radius based on direction
+      IF r.nx > r.x THEN
+        cls := cls || ' tl bl'; -- right
+      ELSIF r.nx < r.x THEN
+        cls := cls || ' tr br'; -- left
+      ELSIF r.ny > r.y THEN
+        cls := cls || ' tl tr'; -- down
+      ELSIF r.ny < r.y THEN
+        cls := cls || ' bl br'; -- up
+      END IF;
+    ELSIF r.nx IS NULL THEN
+      cls := 'snake-head';
+    ELSE
+      cls := 'snake';
+    END IF;
+    -- add border radius classes when turning
+    IF (r.px = r.x AND r.py > r.y) THEN    -- going up
+      IF    r.nx < r.x THEN  -- turn left
+        cls := cls || ' tr';
+      ELSIF r.nx > r.x THEN  -- turn right
+        cls := cls || ' tl';
+      END IF;
+    ELSIF (r.px = r.x AND r.py < r.y) THEN -- going down
+      IF r.nx < r.x THEN     -- turn left
+        cls := cls || ' br';
+      ELSIF r.nx > r.x THEN  -- turn right
+        cls := cls || ' bl';
+      END IF;
+    ELSIF (r.py = r.y AND r.px < r.x) THEN -- going right
+      IF r.ny < r.y THEN     -- turn up
+        cls := cls || ' br';
+      ELSIF r.ny > r.y THEN  -- turn down
+        cls := cls || ' tr';
+      END IF;
+    ELSIF (r.py = r.y AND r.px > r.x) THEN -- going left
+      IF r.ny < r.y THEN     -- turn up
+        cls := cls || ' bl';
+      ELSIF r.ny > r.y THEN  -- turn down
+        cls := cls || ' tl';
+      END IF;
+    END IF;
+
+    RETURN NEXT (r.x * 16, r.y * 16, cls, ''::TEXT);
+  END LOOP;
+
+  -- Return the food 
+  FOR r IN SELECT food_x * 16, food_y * 16, 'apple'::TEXT, ''::TEXT FROM snake
+  LOOP
+    RETURN NEXT r;
+  END LOOP;
+
+  -- Return score element
+  RETURN NEXT (0, 0, 'score'::TEXT,
+               ('init put ' || (select (count(id) - 3) * 17 from snake_pos)::text || ' into #score')::TEXT);
+
+  -- If game over, add the overlay
+  SELECT game_over INTO g_over FROM snake;
+  IF g_over THEN
+    RETURN NEXT (160, 160, 'game-over'::TEXT, ''::TEXT);
+  END IF;
+  
+END
+$$ LANGUAGE plpgsql;
+
+-- Template to render game grid
 CREATE OR REPLACE FUNCTION game.render(hx_trigger TEXT) RETURNS "text/html" AS $$
 div#game.grid(hx-post="/tick" hx-trigger="{{hx_trigger}}" hx-swap="outerHTML"
-    m:q="SELECT x * 16 as x, y * 16 as y, 'snake' as type, '' as hs FROM snake_pos
-         UNION 
-         SELECT food_x * 16 as x, food_y * 16 as y, 'apple' as type, '' as hs FROM snake
-         UNION
-         SELECT 0 as x, 0 as y, 'score' as type,
-                'init put ' || (select (count(id) - 3) * 17 from snake_pos)::text || ' into #score' as hs
-         UNION
-         SELECT 160 as x, 160 as y, 'game-over' as type, '' as hs FROM snake WHERE game_over = true")
+    m:q="SELECT * FROM game.entities() as e (x integer, y integer, type text, hs text)")
   div(_="{{hs}}" class="cell {{type}}" style="top: {{y}}px;left: {{x}}px;")
 $$ LANGUAGE plmuggin;
 
@@ -140,7 +216,7 @@ BEGIN
   DELETE FROM snake;
   DELETE FROM snake_pos;
   INSERT INTO snake (dir, score, frame, length, game_over)
-  VALUES ('UP', 0, 0, 3, false);
+  VALUES ('UP', 0, 0, 15, false); -- 3 => 15
   PERFORM game.new_food();
   INSERT INTO snake_pos (x,y)
   VALUES (20, 21), (20, 20);
@@ -336,13 +412,21 @@ body {
   background: #2da84e;
 }
 
-/* Snake Head — brighter, slightly larger radius */
-
 .cell.snake-head {
   background: #4eff8a;
   border-radius: 4px;
   box-shadow: 0 0 8px rgba(78, 255, 138, 0.6);
 }
+
+.cell.snake-tail {
+  background: #11361b;
+}
+
+/* direction based border radiuses for nice corners and ends */
+.tl { border-top-left-radius:     66%; }
+.tr { border-top-right-radius:    66%; }
+.bl { border-bottom-left-radius:  66%; }
+.br { border-bottom-right-radius: 66%; }
 
 /* ===== Game Over Overlay ===== */
 
@@ -387,38 +471,6 @@ body {
   color: #9aa3bf;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.game-over-score span {
-  color: #f0c040;
-  font-size: 1.4rem;
-  font-weight: 700;
-}
-
-.game-over-new-game-btn {
-  padding: 0.7rem 2rem;
-  font-size: 1rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  background: #3ddc84;
-  color: #0f1117;
-  transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
-  box-shadow: 0 3px 12px rgba(61, 220, 132, 0.45);
-}
-
-.game-over-new-game-btn:hover {
-  background: #57e89b;
-  box-shadow: 0 5px 18px rgba(61, 220, 132, 0.6);
-}
-
-.game-over-new-game-btn:active {
-  background: #2bbf6e;
-  transform: translateY(1px);
-  box-shadow: 0 2px 6px rgba(61, 220, 132, 0.3);
 }
 ';
 END
