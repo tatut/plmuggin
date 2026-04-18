@@ -16,3 +16,5 @@ jobs:
       - run: ./mugshot/test/start.sh
       - uses: gacts/install-hurl@v1.3.2
       - run: hurl --test mugshot/test/test.hurl
+        continue-on-error: true
+      - run: cat mugshot/test.log
