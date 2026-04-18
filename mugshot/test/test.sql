@@ -57,3 +57,7 @@ html
     div.numbers(m:q="SELECT generate_series({{lo}},{{hi}}) as n")
       span.number {{n}}
 $$ LANGUAGE plmuggin;
+
+GRANT USAGE ON SCHEMA web TO test;
+GRANT ALL PRIVILEGES ON contacts TO test;
+GRANT ALL PRIVILEGES ON contacts_id_seq TO test;
