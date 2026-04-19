@@ -35,6 +35,13 @@ form
   input(name="email" type="text")
 $$ LANGUAGE plmuggin;
 
+CREATE OR REPLACE FUNCTION web."POST/reset"() RETURNS "application/json" AS $$
+BEGIN
+  DELETE FROM contacts;
+  RETURN '{"success": true}';
+END
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION web."POST/form"(email TEXT, name TEXT) RETURNS "application/json" AS $$
 DECLARE
   inserted_id INTEGER;
@@ -57,3 +64,7 @@ html
     div.numbers(m:q="SELECT generate_series({{lo}},{{hi}}) as n")
       span.number {{n}}
 $$ LANGUAGE plmuggin;
+
+GRANT USAGE ON SCHEMA web TO test;
+GRANT ALL PRIVILEGES ON contacts TO test;
+GRANT ALL PRIVILEGES ON contacts_id_seq TO test;

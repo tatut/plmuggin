@@ -342,19 +342,20 @@ fail:
  */
 bool str_urldecode(str *encoded) { return str_urldecode_to(*encoded, encoded); }
 
+#define STRBUF_INITIAL_SIZE 256
 strbuf *strbuf_new() {
   strbuf *sb;
   char *initial;
 
   sb = NEW(strbuf);
   if(!sb) return NULL;
-  initial = ALLOC(64);
+  initial = ALLOC(STRBUF_INITIAL_SIZE);
   if(!initial) {
     FREE(sb);
     return NULL;
   }
   sb->str = (str){.len = 0, .data = initial};
-  sb->capacity = 64;
+  sb->capacity = STRBUF_INITIAL_SIZE;
   return sb;
 }
 
@@ -368,9 +369,10 @@ bool strbuf_ensure(strbuf *buf, size_t space_needed) {
     if(new_capacity < min_capacity) {
       new_capacity = min_capacity;
     }
-    //LOG_NOTICE("%ld - %ld < %ld, realloc to %zu", buf->capacity, buf->str.len, space_needed, new_capacity);
+    LOG_NOTICE("(%p) %ld - %ld < %ld, realloc to %zu", buf->str.data, buf->capacity, buf->str.len, space_needed, new_capacity);
 
     new_data = REALLOC(buf->str.data, new_capacity);
+    LOG_NOTICE("realloc done %p, size: %zu", new_data, new_capacity);
     if(!new_data) {
       LOG_ERROR("Failed to realloc string buffer from size %zu to %zu", buf->capacity, new_capacity);
       return false;

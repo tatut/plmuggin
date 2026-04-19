@@ -112,6 +112,9 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   strbuf *rendered;
   m_Scope *scope;
 
+  // Create string buffer (before SPI_connect) to be in the right ctx
+  rendered = strbuf_new();
+
   fn_pg_proc = SearchSysCache1(PROCOID, ObjectIdGetDatum(fcinfo->flinfo->fn_oid));
   if(!HeapTupleIsValid(fn_pg_proc)) {
     elog(ERROR, "function cache lookup failed: %u", fcinfo->flinfo->fn_oid);
@@ -178,12 +181,12 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   fmgr_info(pg_type_entry->typinput, &result_in_func);
   ReleaseSysCache(ret_type_tuple);
 
-  rendered = strbuf_new();
+
   muggin_render(tpl, scope, rendered);
-
-  ret = InputFunctionCall(&result_in_func, rendered->str.data, result_typioparam, -1);
-
+  LOG_TRACE("render done for \"%s\", data %p (len %zu)", proname, rendered->str.data, rendered->str.len);
   SPI_finish();
+  ret = InputFunctionCall(&result_in_func, rendered->str.data, result_typioparam, -1);
+  LOG_TRACE("InputFunctionCall returned %p", ret);
   PG_RETURN_DATUM(ret);
 
 }
@@ -191,3 +194,11 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
 void log_error(const char *error) { elog(ERROR, "%s", error); }
 void log_notice(const char *notice) { elog(NOTICE, "%s", notice); }
 void log_debug(const char *debug) { elog(DEBUG1, "%s", debug); }
+
+void log_trace(const char *trace) {
+  FILE *f = fopen("/tmp/plmuggin-trace.log", "a");
+  if(f) {
+    fprintf(f, "%s\n", trace);
+    fclose(f);
+  }
+}
