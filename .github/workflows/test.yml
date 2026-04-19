@@ -18,4 +18,5 @@ jobs:
       - run: hurl --test mugshot/test/test.hurl
         continue-on-error: true
       - run: cat mugshot/test.log
+      - run: docker ps -q | xargs -L 1 docker logs
       - run: docker exec $(docker ps -q) cat /tmp/plmuggin-trace.log
