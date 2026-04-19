@@ -342,19 +342,20 @@ fail:
  */
 bool str_urldecode(str *encoded) { return str_urldecode_to(*encoded, encoded); }
 
+#define STRBUF_INITIAL_SIZE 256
 strbuf *strbuf_new() {
   strbuf *sb;
   char *initial;
 
   sb = NEW(strbuf);
   if(!sb) return NULL;
-  initial = ALLOC(64);
+  initial = ALLOC(STRBUF_INITIAL_SIZE);
   if(!initial) {
     FREE(sb);
     return NULL;
   }
   sb->str = (str){.len = 0, .data = initial};
-  sb->capacity = 64;
+  sb->capacity = STRBUF_INITIAL_SIZE;
   return sb;
 }
 

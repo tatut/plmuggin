@@ -182,8 +182,9 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
   muggin_render(tpl, scope, rendered);
   LOG_TRACE("render done for \"%s\", data %p (len %zu)", proname, rendered->str.data, rendered->str.len);
   ret = InputFunctionCall(&result_in_func, rendered->str.data, result_typioparam, -1);
-
+  LOG_TRACE("InputFunctionCall returned %p", ret);
   SPI_finish();
+  LOG_TRACE("plmuggin_func_handler done");
   PG_RETURN_DATUM(ret);
 
 }
