@@ -35,6 +35,13 @@ form
   input(name="email" type="text")
 $$ LANGUAGE plmuggin;
 
+CREATE OR REPLACE FUNCTION web."POST/reset"() RETURNS "application/json" AS $$
+BEGIN
+  DELETE FROM contacts;
+  RETURN '{"success": true}';
+END
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION web."POST/form"(email TEXT, name TEXT) RETURNS "application/json" AS $$
 DECLARE
   inserted_id INTEGER;

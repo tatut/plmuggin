@@ -36,6 +36,12 @@ HTTP 404
 GET http://localhost:3000/2015/October/21
 HTTP 400
 
+# Reset contacts (so running tests multiple times don't fail)
+POST http://localhost:3000/reset
+HTTP 200
+[Asserts]
+jsonpath "$.success" == true
+
 # Post a contact form, check that it returns correct id
 POST http://localhost:3000/form
 [Form]
