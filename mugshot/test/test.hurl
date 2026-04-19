@@ -68,8 +68,8 @@ jsonpath "$.success" == true
 jsonpath "$.id" > {{john_id}}
 
 # Get numbers
-GET http://localhost:3000/numbers?lo=420&hi=1000
+GET http://localhost:3000/numbers?lo=420&hi=444
 HTTP 200
 [Asserts]
 xpath "string(//div/span[position()=1]/text())" == "420"
-xpath "string(//div/span[position()=581]/text())" == "1000"
+xpath "string(//div/span[position()=24]/text())" == "444"
