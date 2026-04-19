@@ -38,7 +38,7 @@ function mug(indent, node) {
 }
 
 function html2mug() {
-    const node = document.createNode("html");
+    const node = document.createElement("html");
     node.innerHTML = document.querySelector("#src").value;
     const dst = document.querySelector("#dst");
     dst.value = "";
