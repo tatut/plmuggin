@@ -691,7 +691,7 @@ static int query(_rctx *ctx, m_Contents *contents) {
     case CT_NAME: {
       m_Binding b;
       b = ctx->scope->values[contents->contents[i].id];
-      LOG_DEBUG("idx: %zu, b.flags = %d", contents->contents[i].id, b.flags);
+      LOG_TRACE("idx: %zu, b.flags = %d", contents->contents[i].id, b.flags);
       if(b.flags & BF_HAS_VALUE) {
         argtypes[nargs] = b.oid;
         values[nargs] = b.value;
@@ -708,7 +708,9 @@ static int query(_rctx *ctx, m_Contents *contents) {
   strbuf_append_char(sb, 0); // NUL terminate
   LOG_DEBUG("Running query: %s", sb->str.data);
   // max 65536 rows
+  LOG_TRACE("Calling SPI_execute_with_args with %d args", nargs);
   result = SPI_execute_with_args(sb->str.data, nargs, argtypes, values, NULL, true, 1<<16);
+  LOG_TRACE("SPI_execute_with_args returned %d", result);
   FREE(sb->str.data);
   FREE(sb);
   return result;
@@ -728,11 +730,11 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
       a = n->elt.attributes[i];
       if(ctx->has_query && n->elt.attributes[i].name == ctx->mq_idx) {
         // "m:q" is not rendered as an attr, it does a query to loop children
-        LOG_DEBUG("we have a query!");
+        LOG_TRACE("we have a query!");
         mq_attr = (int) i;
         continue;
       }
-      LOG_DEBUG("(%zu/%zu) attr "STR_FMT" has type %d",
+      LOG_TRACE("(%zu/%zu) attr "STR_FMT" has type %d",
                  i, n->elt.attributes_count,
                  STR_ARG(CONSTANT(ctx->t, a.name)), a.type);
       switch(a.type) {
@@ -765,7 +767,7 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
         break;
       }
       case AT_CONSTANT: {
-        LOG_DEBUG("render constant attr '%.*s' value '%.*s'",
+        LOG_TRACE("render constant attr '%.*s' value '%.*s'",
                    STR_ARG(CONSTANT(ctx->t,a.name)),
                    STR_ARG(CONSTANT(ctx->t, a.constant)));
         strbuf_append_char(sb, ' ');
@@ -887,7 +889,6 @@ void muggin_scope_bind(m_Scope *scope, str name, Oid type, Datum value, uint8_t 
 }
 
 void muggin_scope_bind_idx(m_Scope *scope, size_t idx, Oid type, Datum value, uint8_t flags) {
-  LOG_DEBUG("idx %zu bound to "STR_FMT, idx, STR_ARG(value));
   scope->values[idx] = (m_Binding) {
     .oid = type,
     .value = value,
@@ -908,8 +909,10 @@ bool muggin_render(m_Template *t, m_Scope *scope, strbuf *to) {
                                   cstr("m:q"), &ctx.has_query);
 
   strbuf_append_str(to, str_constant("<!DOCTYPE html>\n"));
+  LOG_TRACE("before render root");
   muggin_render_node(&ctx, t->root, to);
   strbuf_append_char(to, 0); // NUL terminate to play nice as C string
+  LOG_TRACE("after render root");
 
   return true;
 }

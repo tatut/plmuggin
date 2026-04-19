@@ -191,3 +191,11 @@ static Datum plmuggin_func_handler(PG_FUNCTION_ARGS) {
 void log_error(const char *error) { elog(ERROR, "%s", error); }
 void log_notice(const char *notice) { elog(NOTICE, "%s", notice); }
 void log_debug(const char *debug) { elog(DEBUG1, "%s", debug); }
+
+void log_trace(const char *trace) {
+  FILE *f = fopen("/tmp/plmuggin-trace.log", "a");
+  if(f) {
+    fprintf(f, "%s\n", trace);
+    fclose(f);
+  }
+}

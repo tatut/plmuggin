@@ -51,10 +51,10 @@ const int logo_color[] = {31, 31, 31, 31, 31, 31, 31, 31, 31, 32, 32, 32, 32,
 
 
 
-void log_error(const char *error) { fprintf(stderr, "\e[31m[ERROR]\e[0m %s", error); }
-void log_notice(const char *notice) { fprintf(stdout, "%s", notice); }
-void log_debug(const char *debug) { fprintf(stdout, "%s", debug); }
-
+void log_error(const char *error) { fprintf(stderr, "\e[31m[ERROR]\e[0m %s\n", error); }
+void log_notice(const char *notice) { fprintf(stdout, "%s\n", notice); }
+void log_debug(const char *debug) { fprintf(stdout, "%s\n", debug); }
+void log_trace(const char *trace) { fprintf(stdout, "%s\n", trace); }
 /* == Logging == */
 
 // add timestamp?
