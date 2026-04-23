@@ -144,6 +144,8 @@ static size_t string_pool_lookup(str *pool, size_t *idxs, size_t count, size_t c
 static size_t string_pool_use(_ctx *ctx, size_t **idx, str **pool, size_t *count,
                               size_t *capacity, str s) {
   size_t id;
+  bool found;
+
   if(*count == *capacity) {
     size_t *old_idx = *idx;
     str *old_pool = *pool;
@@ -166,6 +168,9 @@ static size_t string_pool_use(_ctx *ctx, size_t **idx, str **pool, size_t *count
     if(old_idx) FREE(old_idx);
     *count = old_count;
   }
+
+  id = string_pool_lookup(*pool, *idx, *count, *capacity, s, &found);
+  if(found) return id;
 
   id = string_pool_idx(ctx, *pool, *idx, *count, *capacity, s);
   *count += 1;
@@ -380,10 +385,12 @@ static bool muggin_contents_add_str(_ctx *ctx, m_Contents *contents,
                                     m_ContentType type, str content) {
   LOG_DEBUG("str cont (%d) => "STR_FMT, type, STR_ARG(content));
   switch(type) {
-  case CT_CONSTANT: return muggin_contents_add(ctx, contents, type,
-                                               muggin_use_constant(ctx, content));
-  case CT_NAME: return muggin_contents_add(ctx, contents, type,
-                                           muggin_use_name(ctx, content));
+  case CT_CONSTANT:
+    return muggin_contents_add(ctx, contents, type,
+                               muggin_use_constant(ctx, content));
+  case CT_NAME:
+    return muggin_contents_add(ctx, contents, type,
+                               muggin_use_name(ctx, content));
   }
   return false;
 }
@@ -655,7 +662,6 @@ void muggin_render_contents(_rctx *ctx, m_Contents *contents, strbuf *sb) {
         }
       } else {
         LOG_NOTICE("Missing value for: "STR_FMT, STR_ARG(NAME(ctx->t, contents->contents[i].id)));
-
       }
       break;
     }
@@ -739,34 +745,6 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
                  i, n->elt.attributes_count,
                  STR_ARG(CONSTANT(ctx->t, a.name)), a.type);
       switch(a.type) {
-      case AT_BOOL: {
-        if(a.bool_value) {
-          strbuf_append_char(sb, ' ');
-          strbuf_append_str(sb, CONSTANT(ctx->t, a.name));
-        }
-        break;
-      }
-      case AT_STRING: {
-        strbuf_append_char(sb, ' ');
-        strbuf_append_str(sb, CONSTANT(ctx->t, a.name));
-        strbuf_append_str(sb, str_constant("=\""));
-        strbuf_append_str(sb, a.str_value);
-        strbuf_append_char(sb, '"');
-        break;
-      }
-      case AT_INT: {
-        strbuf_append_char(sb, ' ');
-        strbuf_append_str(sb, CONSTANT(ctx->t, a.name));
-        strbuf_append_char(sb, '=');
-        strbuf_append_int(sb, a.int_value);
-        break;
-      }
-      case AT_DOUBLE: {
-        char dbl[64]; // PENDING: what's a reasonable max len?
-        size_t len = snprintf(dbl, 64, "%.2f", a.double_value);
-        strbuf_append_str(sb, (str){.len = len, .data = dbl});
-        break;
-      }
       case AT_CONSTANT: {
         LOG_TRACE("render constant attr '%.*s' value '%.*s'",
                    STR_ARG(CONSTANT(ctx->t,a.name)),
@@ -778,16 +756,6 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
         strbuf_append_char(sb, '"');
         break;
       }
-      case AT_VARIABLE: {
-        // FIXME: render actual variable!
-        strbuf_append_char(sb, ' ');
-        strbuf_append_str(sb, CONSTANT(ctx->t, a.name));
-        strbuf_append_str(sb, str_constant("=\""));
-        strbuf_append_str(sb, str_constant("MUUTTUJA!"));
-        strbuf_append_str(sb, NAME(ctx->t, a.variable));
-        strbuf_append_char(sb, '"');
-        break;
-      }
       case AT_CONTENTS: {
         strbuf_append_char(sb, ' ');
         strbuf_append_str(sb, CONSTANT(ctx->t, a.name));
@@ -796,6 +764,9 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
         strbuf_append_char(sb, '"');
         break;
       }
+      default:
+        // There are actually only constants and contents (
+        LOG_NOTICE("FIXME: Unsupported attribute type (%d)", a.type);
     }
     }// end attributes
 
@@ -808,11 +779,12 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
         if(result < 1 || !SPI_tuptable) {
           LOG_ERROR("Query failed, result: %d", result);
         } else {
+          SPITupleTable *table = SPI_tuptable;
           TupleDesc tupdesc;
           int *varidx;
 
           // Bind selected items and recurse into children
-          tupdesc = SPI_tuptable->tupdesc;
+          tupdesc = table->tupdesc;
           varidx = NEW_ARR(int, tupdesc->natts);
 
           /* Resolve columns to variables */
@@ -832,9 +804,9 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
               }
           }
 
-          for(int row = 0; row < SPI_tuptable->numvals; row++) {
+          for(int row = 0; row < table->numvals; row++) {
             HeapTuple tuple;
-            tuple = SPI_tuptable->vals[row];
+            tuple = table->vals[row];
 
             for (int col = 1; col <= tupdesc->natts; col++) {
               Oid type;
@@ -846,15 +818,14 @@ void muggin_render_node(_rctx *ctx, m_Node *n, strbuf *sb) {
                 type = SPI_gettypeid(tupdesc, col);
                 value = SPI_getbinval(tuple, tupdesc, col, &isnull);
                 muggin_scope_bind_idx(ctx->scope, idx, type, value, BF_NEED_ESCAPE);
-
               }
             }
             /* Render all children */
             for(int i = 0; i < n->elt.children_count; i++) {
               muggin_render_node(ctx, &n->elt.children[i], sb);
             }
-
           }
+          SPI_freetuptable(table);
         }
       } else {
         // recurse into children, unless this is a void element
